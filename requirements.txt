@@ -1,7 +1,8 @@
-streamlit
-google-play-scraper
-transformers
-pandas
-torch==2.0.1
-nltk
-plotly
+streamlit==1.35.0
+google-play-scraper==1.2.7
+transformers==4.41.2
+pandas==2.2.2
+torch==2.3.1
+nltk==3.8.1
+plotly==5.22.0
+sentencepiece==0.2.0
