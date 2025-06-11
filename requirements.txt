@@ -1,0 +1,7 @@
+streamlit
+google-play-scraper
+transformers
+pandas
+torch
+nltk
+plotly
