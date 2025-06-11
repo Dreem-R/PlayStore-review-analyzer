@@ -14,7 +14,11 @@ try:
 except LookupError:
     nltk.download('punkt_tab')
 
-summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-6-6", device=-1)
+try:
+    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-6-6", device=-1)
+except Exception as e:
+    st.error(f"Failed to load sshleifer/distilbart-cnn-6-6 model: {str(e)}")
+    summarizer = pipeline("summarization", model="t5-small", device=-1)
 
 def extract_key_issues(reviews):
     if not reviews:
