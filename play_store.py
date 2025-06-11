@@ -14,7 +14,7 @@ try:
 except LookupError:
     nltk.download('punkt_tab')
 
-summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-6-6", device=-1)
 
 def extract_key_issues(reviews):
     if not reviews:
@@ -184,6 +184,7 @@ if app_query:
                         xanchor="center",
                         x=0.5,
                         font=dict(size=12, color="#FFFFFF"),
+                        bgcolor="rgba(255,255,255,0.8)"
                     ),
                     margin=dict(t=50, b=50, l=20, r=20),
                     paper_bgcolor="rgba(0,0,0,0)",

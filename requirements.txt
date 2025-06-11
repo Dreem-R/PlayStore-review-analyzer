@@ -2,6 +2,6 @@ streamlit
 google-play-scraper
 transformers
 pandas
-torch
+torch==2.0.1
 nltk
 plotly
