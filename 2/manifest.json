@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Cart Tracker AI",
+  "version": "1.0",
+  "description": "Tracks cart items and sends to AI cart recovery backend",
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": [
+    "https://www.amazon.in/*",
+    "https://www.flipkart.com/*",
+    "https://www.myntra.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.amazon.in/*",
+        "https://www.flipkart.com/*",
+        "https://www.myntra.com/*"
+      ],
+      "js": ["content.js"]
+    }
+  ]
+}

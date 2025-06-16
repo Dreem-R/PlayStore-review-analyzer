@@ -1,6 +1,6 @@
 import streamlit as st
 from google_play_scraper import reviews, Sort, search
-from transformers import pipeline
+from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
 from collections import Counter
 import pandas as pd
 import json
@@ -8,24 +8,86 @@ import nltk
 from nltk.tokenize import sent_tokenize
 import re
 import plotly.express as px
+import os
+import glob
 
+# Set NLTK data path to the nltk_data directory in the project
+nltk_data_path = os.path.join(os.path.dirname(__file__), 'nltk_data')
+nltk.data.path.append(nltk_data_path)
+
+# Flag to track if NLTK tokenization is available
+nltk_tokenization_available = True
+
+# Ensure punkt_tab is available
 try:
     nltk.data.find('tokenizers/punkt_tab')
-except LookupError:
-    nltk.download('punkt_tab')
+except (LookupError, OSError) as e:
+    st.warning(f"Failed to load NLTK punkt_tab: {str(e)}. Sentence tokenization may not work; summarization will be used as a fallback.")
+    nltk_tokenization_available = False
 
+# Set the cache directory for Hugging Face models
+cache_dir = os.path.join(os.path.dirname(__file__), 'hf_models')
+
+# Function to find the snapshot directory containing the model files
+def find_model_snapshot_dir(base_model_path):
+    snapshot_dir = os.path.join(base_model_path, 'snapshots')
+    if not os.path.exists(snapshot_dir):
+        return None
+    # Look for the first subdirectory in snapshots that contains config.json
+    for subdir in glob.glob(os.path.join(snapshot_dir, '*')):
+        if os.path.exists(os.path.join(subdir, 'config.json')):
+            return subdir
+    return None
+
+# Load the summarization model from the local cache
 try:
-    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-6-6", device=-1)
+    # Define base paths for the models
+    distilbart_path = os.path.join(cache_dir, 'sshleifer', 'distilbart-cnn-6-6')
+    t5_small_path = os.path.join(cache_dir, 't5-small')
+
+    # Find the snapshot directories
+    distilbart_snapshot = find_model_snapshot_dir(distilbart_path)
+    t5_small_snapshot = find_model_snapshot_dir(t5_small_path)
+
+    # Load the primary model (distilbart)
+    if distilbart_snapshot:
+        model = AutoModelForSeq2SeqLM.from_pretrained(distilbart_snapshot)
+        tokenizer = AutoTokenizer.from_pretrained(distilbart_snapshot)
+        summarizer = pipeline("summarization", model=model, tokenizer=tokenizer, device=-1)
+    else:
+        raise FileNotFoundError("distilbart-cnn-6-6 snapshot directory not found")
+
 except Exception as e:
     st.error(f"Failed to load sshleifer/distilbart-cnn-6-6 model: {str(e)}")
-    summarizer = pipeline("summarization", model="t5-small", device=-1)
+    # Fallback to t5-small
+    try:
+        if t5_small_snapshot:
+            model = AutoModelForSeq2SeqLM.from_pretrained(t5_small_snapshot)
+            tokenizer = AutoTokenizer.from_pretrained(t5_small_snapshot)
+            summarizer = pipeline("summarization", model=model, tokenizer=tokenizer, device=-1)
+        else:
+            raise FileNotFoundError("t5-small snapshot directory not found")
+    except Exception as e:
+        st.error(f"Failed to load t5-small model: {str(e)}")
+        st.stop()  # Stop the app if both models fail to load
 
 def extract_key_issues(reviews):
     if not reviews:
         return ["No negative reviews to summarize."]
     
     combined_reviews = " ".join(reviews)
-    sentences = sent_tokenize(combined_reviews)
+    
+    # Try sentence tokenization if NLTK data is available
+    if nltk_tokenization_available:
+        try:
+            sentences = sent_tokenize(combined_reviews)
+        except Exception as e:
+            st.warning(f"Sentence tokenization failed: {str(e)}. Falling back to summarization.")
+            sentences = []
+    else:
+        sentences = []
+
+    # Keyword-based issue extraction
     issue_keywords = {
         "interface": ["interface", "design", "navigation", "ui"],
         "performance": ["slow", "lag", "crash", "bug", "performance"],
@@ -36,15 +98,17 @@ def extract_key_issues(reviews):
     }
     
     key_issues = []
-    for sentence in sentences:
-        sentence_lower = sentence.lower()
-        for category, keywords in issue_keywords.items():
-            if any(keyword in sentence_lower for keyword in keywords):
-                cleaned_sentence = re.sub(r'\s+', ' ', sentence.strip())
-                if len(cleaned_sentence) > 10:
-                    key_issues.append(cleaned_sentence)
-                break
+    if sentences:
+        for sentence in sentences:
+            sentence_lower = sentence.lower()
+            for category, keywords in issue_keywords.items():
+                if any(keyword in sentence_lower for keyword in keywords):
+                    cleaned_sentence = re.sub(r'\s+', ' ', sentence.strip())
+                    if len(cleaned_sentence) > 10:
+                        key_issues.append(cleaned_sentence)
+                    break
     
+    # Fallback to summarization if no issues are found or if tokenization failed
     if not key_issues:
         try:
             summary_result = summarizer(
