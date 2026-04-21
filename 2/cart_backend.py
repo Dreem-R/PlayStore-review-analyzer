@@ -4,6 +4,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask_cors import CORS
 import google.generativeai as genai
+import os
 from dotenv import load_dotenv
 
 # Load environment variables
