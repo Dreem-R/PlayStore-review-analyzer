@@ -4,10 +4,19 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask_cors import CORS
 import google.generativeai as genai
+from dotenv import load_dotenv
 
-GMAIL_ADDRESS = "rkiri1209@gmail.com"
-GMAIL_APP_PASSWORD = "***REMOVED***"
-GEMINI_API_KEY = "***REMOVED***"
+# Load environment variables
+load_dotenv()
+
+# Get credentials from environment variables
+GMAIL_ADDRESS = os.getenv('GMAIL_ADDRESS')
+GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+
+# Validate credentials
+if not all([GMAIL_ADDRESS, GMAIL_APP_PASSWORD, GEMINI_API_KEY]):
+    raise ValueError("❌ Missing required environment variables in .env file")
 
 genai.configure(api_key=GEMINI_API_KEY)
 

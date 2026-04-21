@@ -1,0 +1,31 @@
+# Add secrets to .gitignore
+@"
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*`$py.class
+venv/
+env/
+
+# Secrets and credentials
+secrets.txt
+credentials.txt
+*.key
+*.pem
+"@ | Add-Content ".gitignore"
+
+# Verify
+Get-Content ".gitignore"
+bfg-1.15.0.jar
