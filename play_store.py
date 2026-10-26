@@ -1,281 +1,221 @@
-import streamlit as st
-from google_play_scraper import reviews, Sort, search
-from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
-from collections import Counter
-import pandas as pd
-import json
-import nltk
-from nltk.tokenize import sent_tokenize
 import re
+
+import pandas as pd
 import plotly.express as px
-import os
-import glob
+import streamlit as st
+from google_play_scraper import Sort, reviews, search
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-# Set NLTK data path to the nltk_data directory in the project
-nltk_data_path = os.path.join(os.path.dirname(__file__), 'nltk_data')
-nltk.data.path.append(nltk_data_path)
+SUMMARIZER_MODEL = "sshleifer/distilbart-cnn-6-6"
+MAX_ISSUES = 5
 
-# Flag to track if NLTK tokenization is available
-nltk_tokenization_available = True
+# Each category maps to the keywords that signal it and the suggestion shown when it appears.
+ISSUE_CATEGORIES = {
+    "Interface": (
+        ["interface", "design", "navigation", "ui", "ux"],
+        "Improve interface consistency and streamline navigation.",
+    ),
+    "Performance": (
+        ["slow", "lag", "laggy", "lagging", "crash", "freeze", "freezing", "bug", "buggy",
+         "glitch", "glitchy", "performance"],
+        "Optimize loading times and fix reported bugs/crashes.",
+    ),
+    "Security": (
+        ["security", "privacy", "hack", "leak", "scam"],
+        "Enhance user data protection and address privacy concerns.",
+    ),
+    "Size": (
+        ["size", "storage", "space"],
+        "Reduce app size by optimizing assets and libraries.",
+    ),
+    "Ads": (
+        ["ad", "ads", "advert", "advertisement", "pop-up", "popup"],
+        "Reduce intrusive ads or offer an ad-free option.",
+    ),
+    "Login": (
+        ["login", "log in", "signup", "sign up", "account", "verification", "otp"],
+        "Simplify authentication and fix signup/login flows.",
+    ),
+}
 
-# Ensure punkt_tab is available
-try:
-    nltk.data.find('tokenizers/punkt_tab')
-except (LookupError, OSError) as e:
-    st.warning(f"Failed to load NLTK punkt_tab: {str(e)}. Sentence tokenization may not work; summarization will be used as a fallback.")
-    nltk_tokenization_available = False
+# Whole-word match with simple inflections, so "ui" doesn't match "build" and "ads" doesn't match "loads".
+CATEGORY_PATTERNS = {
+    category: re.compile(
+        r"\b(?:" + "|".join(re.escape(k) for k in keywords) + r")(?:s|es|ed|ing)?\b",
+        re.IGNORECASE,
+    )
+    for category, (keywords, _) in ISSUE_CATEGORIES.items()
+}
 
-# Set the cache directory for Hugging Face models
-cache_dir = os.path.join(os.path.dirname(__file__), 'hf_models')
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
-# Function to find the snapshot directory containing the model files
-def find_model_snapshot_dir(base_model_path):
-    snapshot_dir = os.path.join(base_model_path, 'snapshots')
-    if not os.path.exists(snapshot_dir):
-        return None
-    # Look for the first subdirectory in snapshots that contains config.json
-    for subdir in glob.glob(os.path.join(snapshot_dir, '*')):
-        if os.path.exists(os.path.join(subdir, 'config.json')):
-            return subdir
-    return None
 
-# Load the summarization model from the local cache
-try:
-    # Define base paths for the models
-    distilbart_path = os.path.join(cache_dir, 'sshleifer', 'distilbart-cnn-6-6')
-    t5_small_path = os.path.join(cache_dir, 't5-small')
+@st.cache_resource(show_spinner="Loading summarization model (first run downloads ~500 MB)...")
+def load_summarizer():
+    tokenizer = AutoTokenizer.from_pretrained(SUMMARIZER_MODEL)
+    model = AutoModelForSeq2SeqLM.from_pretrained(SUMMARIZER_MODEL)
+    return tokenizer, model
 
-    # Find the snapshot directories
-    distilbart_snapshot = find_model_snapshot_dir(distilbart_path)
-    t5_small_snapshot = find_model_snapshot_dir(t5_small_path)
 
-    # Load the primary model (distilbart)
-    if distilbart_snapshot:
-        model = AutoModelForSeq2SeqLM.from_pretrained(distilbart_snapshot)
-        tokenizer = AutoTokenizer.from_pretrained(distilbart_snapshot)
-        summarizer = pipeline("summarization", model=model, tokenizer=tokenizer, device=-1)
-    else:
-        raise FileNotFoundError("distilbart-cnn-6-6 snapshot directory not found")
+def summarize(text, max_length=100, min_length=30):
+    tokenizer, model = load_summarizer()
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=1024)
+    output = model.generate(**inputs, max_length=max_length, min_length=min_length, num_beams=4)
+    return tokenizer.decode(output[0], skip_special_tokens=True).strip()
 
-except Exception as e:
-    st.error(f"Failed to load sshleifer/distilbart-cnn-6-6 model: {str(e)}")
-    # Fallback to t5-small
-    try:
-        if t5_small_snapshot:
-            model = AutoModelForSeq2SeqLM.from_pretrained(t5_small_snapshot)
-            tokenizer = AutoTokenizer.from_pretrained(t5_small_snapshot)
-            summarizer = pipeline("summarization", model=model, tokenizer=tokenizer, device=-1)
-        else:
-            raise FileNotFoundError("t5-small snapshot directory not found")
-    except Exception as e:
-        st.error(f"Failed to load t5-small model: {str(e)}")
-        st.stop()  # Stop the app if both models fail to load
 
-def extract_key_issues(reviews):
-    if not reviews:
-        return ["No negative reviews to summarize."]
-    
-    combined_reviews = " ".join(reviews)
-    
-    # Try sentence tokenization if NLTK data is available
-    if nltk_tokenization_available:
-        try:
-            sentences = sent_tokenize(combined_reviews)
-        except Exception as e:
-            st.warning(f"Sentence tokenization failed: {str(e)}. Falling back to summarization.")
-            sentences = []
-    else:
-        sentences = []
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_apps(query):
+    # The scraper returns appId=None for the "featured" top result; it can't be fetched, so skip it.
+    results = search(query, lang="en", country="us")
+    return [(app["title"], app["appId"]) for app in results if app.get("appId")][:5]
 
-    # Keyword-based issue extraction
-    issue_keywords = {
-        "interface": ["interface", "design", "navigation", "ui"],
-        "performance": ["slow", "lag", "crash", "bug", "performance"],
-        "security": ["security", "privacy", "hack", "leak"],
-        "size": ["size", "storage", "space"],
-        "ads": ["ads", "advertisement", "pop-up"],
-        "login": ["login", "signup", "account", "verification"]
-    }
-    
-    key_issues = []
-    if sentences:
-        for sentence in sentences:
-            sentence_lower = sentence.lower()
-            for category, keywords in issue_keywords.items():
-                if any(keyword in sentence_lower for keyword in keywords):
-                    cleaned_sentence = re.sub(r'\s+', ' ', sentence.strip())
-                    if len(cleaned_sentence) > 10:
-                        key_issues.append(cleaned_sentence)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_reviews(package_name, count):
+    result, _ = reviews(package_name, lang="en", country="us", sort=Sort.NEWEST, count=count)
+    return result
+
+
+def sentiment_from_rating(rating):
+    if rating >= 4:
+        return "Positive"
+    if rating == 3:
+        return "Neutral"
+    return "Negative"
+
+
+def extract_key_issues(negative_reviews):
+    """Return (issue sentences, matched categories ordered by frequency)."""
+    if not negative_reviews:
+        return ["No negative reviews to summarize."], []
+
+    issues = []
+    category_counts = {}
+    for review in negative_reviews:
+        for sentence in SENTENCE_SPLIT.split(review):
+            sentence = " ".join(sentence.split())
+            if len(sentence) <= 10:
+                continue
+            for category, pattern in CATEGORY_PATTERNS.items():
+                if pattern.search(sentence):
+                    category_counts[category] = category_counts.get(category, 0) + 1
+                    issues.append(sentence)
                     break
-    
-    # Fallback to summarization if no issues are found or if tokenization failed
-    if not key_issues:
-        try:
-            summary_result = summarizer(
-                combined_reviews[:1000],
-                max_length=100,
-                min_length=30,
-                do_sample=False
-            )
-            key_issues = [summary_result[0]['summary_text']]
-        except Exception as e:
-            key_issues = [f"Error summarizing reviews: {str(e)}"]
-    
-    return key_issues[:5]
 
-def analyze_reviews(package_name, review_count):
+    categories = sorted(category_counts, key=category_counts.get, reverse=True)
+    if issues:
+        return issues[:MAX_ISSUES], categories
+
+    # No keyword hits: summarize the negative reviews instead.
     try:
-        result, _ = reviews(
-            package_name,
-            lang='en',
-            country='us',
-            sort=Sort.NEWEST,
-            count=review_count
-        )
+        return [summarize(" ".join(negative_reviews))], categories
     except Exception as e:
-        return None, str(e)
+        return [f"Could not summarize reviews: {e}"], categories
 
+
+def analyze_reviews(raw_reviews):
     data = []
     negative_reviews = []
-    positive_reviews = []
-
-    for review in result:
-        content = review['content']
-        rating = review['score']
-        sentiment_by_rating = (
-            "Positive" if rating >= 4 else
-            "Neutral" if rating == 3 else
-            "Negative"
-        )
-
+    for review in raw_reviews:
+        content = review["content"] or ""
+        rating = review["score"]
         if rating <= 2:
             negative_reviews.append(content)
-        if rating >= 4:
-            positive_reviews.append(content)
-
         data.append({
-            "User": review['userName'],
+            "User": review["userName"],
             "Rating": rating,
-            "Date": review['at'],
+            "Date": review["at"],
             "Review": content,
-            "Sentiment (Rating-Based)": sentiment_by_rating
+            "Sentiment (Rating-Based)": sentiment_from_rating(rating),
         })
 
-    key_issues = extract_key_issues(negative_reviews)
-    combined_issues = " ".join(key_issues)
-    suggestions = generate_suggestions(combined_issues)
-
+    key_issues, categories = extract_key_issues(negative_reviews)
+    suggestions = [ISSUE_CATEGORIES[c][1] for c in categories]
     return pd.DataFrame(data), key_issues, suggestions
 
-def generate_suggestions(summary):
-    suggestions = []
-    summary_lower = summary.lower()
-    
-    if any(keyword in summary_lower for keyword in ["interface", "design", "navigation", "ui"]):
-        suggestions.append("Improve interface consistency and streamline navigation.")
-    if any(keyword in summary_lower for keyword in ["slow", "lag", "crash", "bug", "performance"]):
-        suggestions.append("Optimize loading times and fix reported bugs/crashes.")
-    if any(keyword in summary_lower for keyword in ["security", "privacy", "hack", "leak"]):
-        suggestions.append("Enhance user data protection and address privacy concerns.")
-    if any(keyword in summary_lower for keyword in ["size", "storage", "space"]):
-        suggestions.append("Reduce app bloat by optimizing assets and libraries.")
-    if any(keyword in summary_lower for keyword in ["ads", "advertisement", "pop-up"]):
-        suggestions.append("Minimize intrusive ads and allow ad-free experience if possible.")
-    if any(keyword in summary_lower for keyword in ["login", "signup", "account", "verification"]):
-        suggestions.append("Simplify authentication and ensure smooth signup/login flows.")
-    
-    return suggestions if suggestions else ["No specific improvements identified from the summary."]
 
-st.set_page_config(page_title="App Review Analyzer Pro", layout="wide")
-st.title("📱 App Review Analyzer with AI Insights")
-st.caption("Get AI-powered insights from app reviews and improve based on real user concerns.")
+def render_sentiment_chart(df):
+    counts = df["Sentiment (Rating-Based)"].value_counts().reset_index()
+    counts.columns = ["Sentiment", "Count"]
+    fig = px.pie(
+        counts,
+        names="Sentiment",
+        values="Count",
+        color="Sentiment",
+        color_discrete_map={"Positive": "#4B8BBE", "Neutral": "#F28C38", "Negative": "#D9534F"},
+    )
+    fig.update_traces(
+        textinfo="percent+label",
+        textposition="inside",
+        hovertemplate="<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>",
+    )
+    fig.update_layout(
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5),
+        margin=dict(t=20, b=50, l=20, r=20),
+    )
+    st.plotly_chart(fig, width="stretch")
 
-app_query = st.text_input("🔍 Search App by Name:", value="Facebook")
-review_options = {
-    "Top 50": 50,
-    "Top 100": 100,
-    "Top 500": 500
-}
-review_count_label = st.selectbox("How many reviews to analyze?", list(review_options.keys()))
-review_count = review_options[review_count_label]
+
+st.set_page_config(page_title="App Review Analyzer", layout="wide")
+st.title("App Review Analyzer")
+st.caption("Summarize recent Google Play reviews: sentiment breakdown, recurring complaints, and what to fix.")
+
+app_query = st.text_input("Search app by name", value="Facebook").strip()
+review_options = {"50 most recent": 50, "100 most recent": 100, "500 most recent": 500}
+review_count = review_options[st.selectbox("Reviews to analyze", list(review_options))]
 
 if app_query:
-    results = search(app_query, lang="en", country="us")
-    app_options = [f"{app['title']} ({app['appId']})" for app in results[:5]]
-    selected_app = st.selectbox("Select App from Results:", app_options)
+    try:
+        apps = search_apps(app_query)
+    except Exception as e:
+        st.error(f"Play Store search failed: {e}")
+        st.stop()
 
-    if st.button("🚀 Analyze"):
-        app_id = selected_app.split("(")[-1].replace(")", "")
-        with st.spinner("Analyzing reviews..."):
-            df, key_issues, suggestions = analyze_reviews(app_id, review_count)
+    if not apps:
+        st.warning(f'No apps found for "{app_query}".')
+        st.stop()
 
-        if df is None:
-            st.error("Error fetching reviews.")
+    title, app_id = st.selectbox(
+        "Select app",
+        apps,
+        format_func=lambda app: f"{app[0]} ({app[1]})",
+    )
+
+    if st.button("Analyze", type="primary"):
+        with st.spinner(f"Fetching and analyzing reviews for {title}..."):
+            try:
+                raw_reviews = fetch_reviews(app_id, review_count)
+            except Exception as e:
+                st.error(f"Could not fetch reviews for {app_id}: {e}")
+                st.stop()
+            if not raw_reviews:
+                st.warning(f"{title} has no English reviews in the US store.")
+                st.stop()
+            df, key_issues, suggestions = analyze_reviews(raw_reviews)
+
+        st.success(f"Analyzed {len(df)} reviews")
+
+        st.subheader("Sentiment distribution")
+        render_sentiment_chart(df)
+
+        st.subheader("Key issues from negative reviews")
+        for issue in key_issues:
+            st.markdown(f"- {issue}")
+
+        st.subheader("Suggested improvements")
+        if suggestions:
+            for suggestion in suggestions:
+                st.markdown(f"- {suggestion}")
         else:
-            st.success(f"✅ Analyzed {len(df)} reviews")
+            st.info("No specific improvements identified.")
 
-            st.subheader("📊 Sentiment Distribution")
-            sentiment_counts = df["Sentiment (Rating-Based)"].value_counts().reset_index()
-            sentiment_counts.columns = ["Sentiment", "Count"]
-            
-            if not sentiment_counts.empty:
-                fig_pie = px.pie(
-                    sentiment_counts,
-                    names="Sentiment",
-                    values="Count",
-                    title="Sentiment Distribution of Reviews",
-                    color="Sentiment",
-                    color_discrete_map={
-                        "Positive": "#4B8BBE",
-                        "Neutral": "#F28C38",
-                        "Negative": "#D9534F"
-                    }
-                )
-                fig_pie.update_traces(
-                    textinfo="percent+label",
-                    textposition="inside",
-                    marker=dict(
-                        line=dict(color="#FFFFFF", width=2)
-                    ),
-                    hovertemplate="<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>",
-                    opacity=0.9
-                )
-                fig_pie.update_layout(
-                    title_font_size=20,
-                    title_font_color="#FFFFFF",
-                    font=dict(color="#FFFFFF"),
-                    legend_title_text="Sentiment",
-                    legend=dict(
-                        orientation="h",
-                        yanchor="bottom",
-                        y=-0.2,
-                        xanchor="center",
-                        x=0.5,
-                        font=dict(size=12, color="#FFFFFF"),
-                        bgcolor="rgba(255,255,255,0.8)"
-                    ),
-                    margin=dict(t=50, b=50, l=20, r=20),
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)"
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
-            else:
-                st.warning("No sentiment data available to display the chart.")
+        with st.expander("Full review data"):
+            st.dataframe(df)
 
-            st.subheader("🚨 Key Issues & Suggestions")
-            st.markdown("**Key Issues from Negative Reviews:**")
-            for issue in key_issues:
-                st.markdown(f"- {issue}")
-            
-            if suggestions:
-                st.markdown("**Suggestions for Improvement:**")
-                for suggestion in suggestions:
-                    st.markdown(f"- 💡 {suggestion}")
-            else:
-                st.info("No specific suggestions generated.")
-
-            with st.expander("📃 Full Review Data"):
-                st.dataframe(df)
-
-            csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download CSV", csv, "review_analysis.csv", "text/csv")
+        st.download_button(
+            "Download CSV",
+            df.to_csv(index=False).encode("utf-8"),
+            f"{app_id}_reviews.csv",
+            "text/csv",
+        )
