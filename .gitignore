@@ -1,26 +1,17 @@
-﻿# Environment variables
-.env
-.env.local
-.env.*.local
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
-*$py.class
+.venv/
 venv/
-env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Secrets and credentials
-secrets.txt
-credentials.txt
-*.key
-*.pem
+# Environment
+.env
+.env.*
+!.env.example
 
-# Build artifacts
-bfg-1.15.0.jar
+# Editors
+.vscode/
+.idea/
