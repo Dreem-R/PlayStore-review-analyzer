@@ -86,12 +86,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Step 4: Download NLTK Data (Optional but Recommended)
-```bash
-python -c "import nltk; nltk.download('punkt_tab')"
-```
-
-### Step 5: Run the Application
+### Step 4: Run the Application
 ```bash
 streamlit run play_store.py
 ```
