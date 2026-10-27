@@ -1,0 +1,12 @@
+[
+  {"review_id": "r01", "app_id": "com.example.notes", "user_name": "Asha", "rating": 5, "content": "Clean design and fast sync. Exactly what I needed.", "created_at": "2026-10-01T09:00:00", "app_version": "3.2.0", "thumbs_up": 4},
+  {"review_id": "r02", "app_id": "com.example.notes", "user_name": "Ben", "rating": 1, "content": "The app crashes every time I open a note with images. Please fix this.", "created_at": "2026-10-02T10:30:00", "app_version": "3.2.0", "thumbs_up": 12},
+  {"review_id": "r03", "app_id": "com.example.notes", "user_name": "Chen", "rating": 2, "content": "Way too many ads now. A full-screen ad after every save is ridiculous.", "created_at": "2026-10-03T08:15:00", "app_version": "3.2.0", "thumbs_up": 7},
+  {"review_id": "r04", "app_id": "com.example.notes", "user_name": "Dana", "rating": 4, "content": "Good app overall, the widget could be better.", "created_at": "2026-10-04T18:45:00", "app_version": "3.1.0", "thumbs_up": 0},
+  {"review_id": "r05", "app_id": "com.example.notes", "user_name": "Eli", "rating": 1, "content": "Can't log in since the update, the verification code never arrives.", "created_at": "2026-10-05T07:20:00", "app_version": "3.2.0", "thumbs_up": 9},
+  {"review_id": "r06", "app_id": "com.example.notes", "user_name": "Fatima", "rating": 3, "content": "It's fine. Does the job but nothing special.", "created_at": "2026-10-06T12:00:00", "app_version": "3.1.0", "thumbs_up": 1},
+  {"review_id": "r07", "app_id": "com.example.notes", "user_name": "Goran", "rating": 2, "content": "Very slow to load my notebooks. It used to be instant.", "created_at": "2026-10-07T21:10:00", "app_version": "3.2.0", "thumbs_up": 3},
+  {"review_id": "r08", "app_id": "com.example.notes", "user_name": "Hana", "rating": 5, "content": "Been using it for years, never had a problem.", "created_at": "2026-10-08T06:05:00", "app_version": "3.0.0", "thumbs_up": 2},
+  {"review_id": "r09", "app_id": "com.example.notes", "user_name": "Ivan", "rating": 1, "content": "Lost all my notes after the update and nobody replied to my emails.", "created_at": "2026-10-09T16:40:00", "app_version": "3.2.0", "thumbs_up": 15},
+  {"review_id": "r10", "app_id": "com.example.notes", "user_name": "Jo", "rating": 4, "content": "Love the dark mode. Would pay for an ad free version.", "created_at": "2026-10-10T11:25:00", "app_version": null, "thumbs_up": 0}
+]
