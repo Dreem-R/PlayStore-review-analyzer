@@ -15,3 +15,6 @@ venv/
 # Editors
 .vscode/
 .idea/
+
+# Local data
+data/
