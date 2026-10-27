@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # The ml extra (torch) isn't needed: tests use a stub summarizer.
+      - run: uv sync --locked --extra ui --group dev
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy
+      - run: uv run pytest
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -t review-analyzer .
+      - name: Smoke test the API container
+        run: |
+          docker run -d --name api -p 8000:8000 review-analyzer
+          for _ in $(seq 30); do curl -fs localhost:8000/health && exit 0; sleep 1; done
+          docker logs api
+          exit 1
