@@ -1,0 +1,27 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - data:/app/data
+      - model-cache:/app/.cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      retries: 10
+
+  ui:
+    build: .
+    command: ["streamlit", "run", "src/review_analyzer/ui/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    environment:
+      REVIEW_ANALYZER_API_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  data:
+  model-cache:
