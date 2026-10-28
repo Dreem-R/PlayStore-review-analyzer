@@ -48,3 +48,27 @@ def test_reviews_are_scoped_by_app(repository: ReviewRepository, reviews: list[R
     assert repository.count("com.example.notes") == 10
     assert repository.count("com.other.app") == 3
     assert {r.app_id for r in repository.latest("com.other.app", 100)} == {"com.other.app"}
+
+
+def test_save_sentiment(repository: ReviewRepository, reviews: list[Review]) -> None:
+    repository.upsert(reviews)
+    repository.save_sentiment({"r02": ("negative", 0.97)})
+
+    stored = {r.review_id: r for r in repository.latest("com.example.notes", 100)}
+    assert stored["r02"].text_sentiment == "negative"
+    assert stored["r02"].sentiment_score == 0.97
+    assert stored["r01"].text_sentiment is None
+
+
+def test_editing_a_review_clears_its_sentiment(
+    repository: ReviewRepository, reviews: list[Review]
+) -> None:
+    repository.upsert(reviews)
+    repository.save_sentiment({"r02": ("negative", 0.97), "r03": ("negative", 0.9)})
+
+    repository.upsert([reviews[1].model_copy(update={"content": "Fixed now, thanks!"})])
+    repository.upsert([reviews[2].model_copy(update={"thumbs_up": 99})])
+
+    stored = {r.review_id: r for r in repository.latest("com.example.notes", 100)}
+    assert stored["r02"].text_sentiment is None  # text changed: score again
+    assert stored["r03"].text_sentiment == "negative"  # text unchanged: keep

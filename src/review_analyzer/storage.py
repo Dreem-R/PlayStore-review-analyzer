@@ -4,11 +4,28 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import Engine, Index, Text, create_engine, func, make_url, select
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import (
+    Engine,
+    Float,
+    Index,
+    Text,
+    create_engine,
+    func,
+    inspect,
+    make_url,
+    select,
+    update,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy.pool import StaticPool
 
-from review_analyzer.schemas import Review
+from review_analyzer.schemas import Review, Sentiment
+
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+# Schema that databases created before migrations were introduced already have.
+BASELINE_REVISION = "0001"
 
 
 class Base(DeclarativeBase):
@@ -28,6 +45,8 @@ class ReviewRow(Base):
     app_version: Mapped[str | None]
     thumbs_up: Mapped[int] = mapped_column(default=0)
     fetched_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    text_sentiment: Mapped[str | None]
+    sentiment_score: Mapped[float | None] = mapped_column(Float)
 
 
 def make_engine(database_url: str) -> Engine:
@@ -45,7 +64,15 @@ def make_engine(database_url: str) -> Engine:
 
 
 def init_db(engine: Engine) -> None:
-    Base.metadata.create_all(engine)
+    """Apply pending migrations."""
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    with engine.begin() as connection:
+        config.attributes["connection"] = connection
+        tables = inspect(connection).get_table_names()
+        if "reviews" in tables and "alembic_version" not in tables:
+            command.stamp(config, BASELINE_REVISION)
+        command.upgrade(config, "head")
 
 
 class ReviewRepository:
@@ -70,12 +97,24 @@ class ReviewRepository:
                 self._session.add(ReviewRow(**review.model_dump()))
             else:
                 # Users can edit a review after posting it.
+                if row.content != review.content:
+                    row.text_sentiment = None
+                    row.sentiment_score = None
                 row.rating = review.rating
                 row.content = review.content
                 row.app_version = review.app_version
                 row.thumbs_up = review.thumbs_up
         self._session.commit()
         return len(incoming) - len(existing)
+
+    def save_sentiment(self, predictions: dict[str, tuple[Sentiment, float]]) -> None:
+        for review_id, (label, score) in predictions.items():
+            self._session.execute(
+                update(ReviewRow)
+                .where(ReviewRow.review_id == review_id)
+                .values(text_sentiment=label, sentiment_score=score)
+            )
+        self._session.commit()
 
     def count(self, app_id: str) -> int:
         stmt = select(func.count()).select_from(ReviewRow).where(ReviewRow.app_id == app_id)
