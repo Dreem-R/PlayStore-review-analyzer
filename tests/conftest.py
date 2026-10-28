@@ -1,15 +1,17 @@
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from numpy.typing import NDArray
 from sqlalchemy.orm import Session
 
 from review_analyzer.api import create_app
 from review_analyzer.config import Settings
-from review_analyzer.schemas import AppSummary, Review
-from review_analyzer.scraper import UpstreamError
+from review_analyzer.schemas import AppSummary, Review, Sentiment
+from review_analyzer.scraper import AppNotFoundError, UpstreamError
 from review_analyzer.storage import ReviewRepository, init_db, make_engine
 
 APP_ID = "com.example.notes"
@@ -28,10 +30,54 @@ class FakeSource:
             raise UpstreamError("Play Store search failed: timeout")
         return [AppSummary(app_id=APP_ID, title="Example Notes", developer="Example Inc.")][:limit]
 
+    def lookup(self, app_id: str) -> AppSummary:
+        if app_id != APP_ID:
+            raise AppNotFoundError(app_id)
+        return AppSummary(app_id=APP_ID, title="Example Notes")
+
     def fetch_reviews(self, app_id: str, count: int) -> list[Review]:
         if self.fail:
             raise UpstreamError(f"Fetching reviews for {app_id} failed: timeout")
         return [r for r in self.reviews if r.app_id == app_id][:count]
+
+
+class FakeSentiment:
+    """Keyword rules instead of a transformer. Records every batch it scores."""
+
+    NEGATIVE = ("crash", "ads", " ad ", "can't", "slow", "lost", "terrible", "nobody")
+    POSITIVE = ("love", "great", "clean", "good", "never had a problem")
+
+    def __init__(self) -> None:
+        self.batches: list[list[str]] = []
+
+    def predict(self, texts: Sequence[str]) -> list[tuple[Sentiment, float]]:
+        self.batches.append(list(texts))
+        return [self._label(f" {t.lower()} ") for t in texts]
+
+    def _label(self, text: str) -> tuple[Sentiment, float]:
+        if any(word in text for word in self.NEGATIVE):
+            return "negative", 0.9
+        if any(word in text for word in self.POSITIVE):
+            return "positive", 0.9
+        return "neutral", 0.6
+
+
+class FakeEmbedder:
+    """Puts sentences about the same topic on the same axis, so clustering is predictable."""
+
+    TOPICS = (("crash", "slow", "freez"), ("ads", " ad "), ("log in", "verification"))
+
+    def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
+        vectors = np.zeros((len(texts), len(self.TOPICS) + len(texts)), dtype=np.float32)
+        for row, text in enumerate(texts):
+            padded = f" {text.lower()} "
+            topic = next(
+                (i for i, words in enumerate(self.TOPICS) if any(w in padded for w in words)),
+                None,
+            )
+            # Off-topic sentences each get their own axis, so they never cluster.
+            vectors[row, topic if topic is not None else len(self.TOPICS) + row] = 1.0
+        return vectors
 
 
 @pytest.fixture
@@ -54,7 +100,23 @@ def source(reviews: list[Review]) -> FakeSource:
 
 
 @pytest.fixture
-def client(source: FakeSource) -> Iterator[TestClient]:
-    app = create_app(Settings(database_url="sqlite://", enable_summarizer=False), source=source)
-    with TestClient(app) as client:
+def sentiment_model() -> FakeSentiment:
+    return FakeSentiment()
+
+
+def _client(source: FakeSource, **models: object) -> Iterator[TestClient]:
+    settings = Settings(database_url="sqlite://", enable_ml=False)
+    with TestClient(create_app(settings, source=source, **models)) as client:  # type: ignore[arg-type]
         yield client
+
+
+@pytest.fixture
+def client(source: FakeSource) -> Iterator[TestClient]:
+    """API without models: keyword issues, rating-only sentiment."""
+    yield from _client(source)
+
+
+@pytest.fixture
+def ml_client(source: FakeSource, sentiment_model: FakeSentiment) -> Iterator[TestClient]:
+    """API with fake models: text sentiment and clustering."""
+    yield from _client(source, sentiment_model=sentiment_model, embedder=FakeEmbedder())

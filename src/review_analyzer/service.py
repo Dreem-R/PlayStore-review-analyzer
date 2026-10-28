@@ -1,5 +1,6 @@
-from review_analyzer.analysis import Summarizer, analyze
-from review_analyzer.schemas import Analysis, AppSummary, ReviewPage, SyncResult
+from review_analyzer.analysis import analyze
+from review_analyzer.ml import Embedder, SentimentModel
+from review_analyzer.schemas import Analysis, AppSummary, Review, ReviewPage, SyncResult
 from review_analyzer.scraper import ReviewSource
 from review_analyzer.storage import ReviewRepository
 
@@ -17,14 +18,19 @@ class ReviewService:
         self,
         source: ReviewSource,
         repository: ReviewRepository,
-        summarizer: Summarizer | None = None,
+        sentiment_model: SentimentModel | None = None,
+        embedder: Embedder | None = None,
     ) -> None:
         self._source = source
         self._repository = repository
-        self._summarizer = summarizer
+        self._sentiment_model = sentiment_model
+        self._embedder = embedder
 
     def search(self, query: str, limit: int) -> list[AppSummary]:
         return self._source.search(query, limit)
+
+    def lookup(self, app_id: str) -> AppSummary:
+        return self._source.lookup(app_id)
 
     def sync(self, app_id: str, count: int) -> SyncResult:
         reviews = self._source.fetch_reviews(app_id, count)
@@ -48,4 +54,34 @@ class ReviewService:
         reviews = self._repository.latest(app_id, limit)
         if not reviews:
             raise NoReviewsError(app_id)
-        return analyze(app_id, reviews, self._summarizer)
+        reviews = self._score_sentiment(reviews)
+        return analyze(app_id, reviews, self._embedder, self._sentiment_model)
+
+    def _score_sentiment(self, reviews: list[Review]) -> list[Review]:
+        """Score reviews that have no text sentiment yet and persist the result.
+
+        Scoring happens here rather than at sync time so syncs stay fast and
+        reviews stored before the model was installed get scored too.
+        """
+        unscored = [r for r in reviews if r.text_sentiment is None]
+        if self._sentiment_model is None or not unscored:
+            return reviews
+        predictions = dict(
+            zip(
+                (r.review_id for r in unscored),
+                self._sentiment_model.predict([r.content for r in unscored]),
+                strict=True,
+            )
+        )
+        self._repository.save_sentiment(predictions)
+        return [
+            r.model_copy(
+                update={
+                    "text_sentiment": predictions[r.review_id][0],
+                    "sentiment_score": predictions[r.review_id][1],
+                }
+            )
+            if r.review_id in predictions
+            else r
+            for r in reviews
+        ]

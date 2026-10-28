@@ -3,7 +3,11 @@ import io
 
 from fastapi.testclient import TestClient
 
-from tests.conftest import APP_ID, FakeSource
+from tests.conftest import APP_ID, FakeSentiment, FakeSource
+
+
+def sync(client: TestClient, count: int = 10) -> None:
+    assert client.post(f"/apps/{APP_ID}/sync", params={"count": count}).status_code == 200
 
 
 def test_health(client: TestClient) -> None:
@@ -20,45 +24,86 @@ def test_search_requires_query(client: TestClient) -> None:
     assert client.get("/apps/search", params={"q": ""}).status_code == 422
 
 
+def test_lookup(client: TestClient) -> None:
+    assert client.get(f"/apps/{APP_ID}").json()["title"] == "Example Notes"
+
+
+def test_lookup_unknown_app_is_404(client: TestClient) -> None:
+    response = client.get("/apps/com.does.not.exist")
+    assert response.status_code == 404
+    assert "com.does.not.exist" in response.json()["detail"]
+
+
 def test_analysis_before_sync_is_404(client: TestClient) -> None:
     response = client.get(f"/apps/{APP_ID}/analysis")
     assert response.status_code == 404
     assert "Sync the app first" in response.json()["detail"]
 
 
-def test_sync_then_analyze(client: TestClient) -> None:
-    sync = client.post(f"/apps/{APP_ID}/sync", params={"count": 10}).json()
-    assert sync == {"app_id": APP_ID, "fetched": 10, "new": 10, "total_stored": 10}
+def test_sync_reports_new_reviews(client: TestClient) -> None:
+    first = client.post(f"/apps/{APP_ID}/sync", params={"count": 5}).json()
+    second = client.post(f"/apps/{APP_ID}/sync", params={"count": 10}).json()
+    assert first == {"app_id": APP_ID, "fetched": 5, "new": 5, "total_stored": 5}
+    assert second["new"] == 5
+    assert second["total_stored"] == 10
 
+
+def test_analysis_without_models_uses_ratings_and_keywords(client: TestClient) -> None:
+    sync(client)
     analysis = client.get(f"/apps/{APP_ID}/analysis").json()
-    assert analysis["review_count"] == 10
-    assert analysis["sentiment"] == {"positive": 4, "neutral": 1, "negative": 5}
-    assert analysis["issues"][0]["mentions"] == 2
+
+    assert analysis["issue_method"] == "keywords"
+    assert analysis["text_sentiment"] is None
+    assert analysis["rating_sentiment"] == {"positive": 4, "neutral": 1, "negative": 5}
+    assert analysis["issues"][0]["label"] == "Performance"
+    assert analysis["mismatches"] == []
 
 
-def test_resync_only_counts_new_reviews(client: TestClient) -> None:
-    client.post(f"/apps/{APP_ID}/sync", params={"count": 5})
-    sync = client.post(f"/apps/{APP_ID}/sync", params={"count": 10}).json()
-    assert sync["new"] == 5
-    assert sync["total_stored"] == 10
+def test_analysis_with_models(ml_client: TestClient) -> None:
+    sync(ml_client)
+    analysis = ml_client.get(f"/apps/{APP_ID}/analysis").json()
+
+    assert analysis["issue_method"] == "clustering"
+    assert analysis["text_sentiment"] is not None
+    assert sum(analysis["text_sentiment"].values()) == 10
+    # r10 is 4 stars but mentions an ad, which FakeSentiment reads as negative.
+    assert [m["review_id"] for m in analysis["mismatches"]] == ["r10"]
+    assert analysis["versions"][0]["version"] == "3.2.0"
+
+
+def test_sentiment_is_scored_once_and_stored(
+    ml_client: TestClient, sentiment_model: FakeSentiment
+) -> None:
+    sync(ml_client)
+    stored = ml_client.get(f"/apps/{APP_ID}/reviews").json()["items"]
+    all_reviews = sorted(r["content"] for r in stored)
+
+    ml_client.get(f"/apps/{APP_ID}/analysis")
+    ml_client.get(f"/apps/{APP_ID}/analysis")
+
+    # Whole reviews are scored in one batch, once; later batches are complaint sentences.
+    review_batches = [b for b in sentiment_model.batches if sorted(b) == all_reviews]
+    assert len(review_batches) == 1
+    stored = ml_client.get(f"/apps/{APP_ID}/reviews").json()["items"]
+    assert all(r["text_sentiment"] is not None for r in stored)
 
 
 def test_analysis_limit_uses_most_recent_reviews(client: TestClient) -> None:
-    client.post(f"/apps/{APP_ID}/sync", params={"count": 10})
+    sync(client)
     analysis = client.get(f"/apps/{APP_ID}/analysis", params={"limit": 2}).json()
     # r10 (rating 4) and r09 (rating 1) are the two newest.
-    assert analysis["sentiment"] == {"positive": 1, "neutral": 0, "negative": 1}
+    assert analysis["rating_sentiment"] == {"positive": 1, "neutral": 0, "negative": 1}
 
 
 def test_reviews_pagination(client: TestClient) -> None:
-    client.post(f"/apps/{APP_ID}/sync", params={"count": 10})
+    sync(client)
     page = client.get(f"/apps/{APP_ID}/reviews", params={"limit": 4, "offset": 4}).json()
     assert page["total"] == 10
     assert [r["review_id"] for r in page["items"]] == ["r06", "r05", "r04", "r03"]
 
 
 def test_export_csv(client: TestClient) -> None:
-    client.post(f"/apps/{APP_ID}/sync", params={"count": 10})
+    sync(client)
     response = client.get(f"/apps/{APP_ID}/export.csv")
 
     assert response.headers["content-type"].startswith("text/csv")
@@ -66,6 +111,7 @@ def test_export_csv(client: TestClient) -> None:
     rows = list(csv.DictReader(io.StringIO(response.text)))
     assert len(rows) == 10
     assert rows[0]["review_id"] == "r10"
+    assert "text_sentiment" in rows[0]
 
 
 def test_rejects_invalid_app_id(client: TestClient) -> None:
