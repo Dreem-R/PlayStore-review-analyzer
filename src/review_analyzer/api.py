@@ -14,13 +14,23 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import sessionmaker
 
 from review_analyzer import __version__
-from review_analyzer.analysis import Summarizer
 from review_analyzer.config import Settings
+from review_analyzer.ml import (
+    Embedder,
+    SentimentModel,
+    TransformerEmbedder,
+    TransformerSentiment,
+    ml_available,
+)
 from review_analyzer.schemas import Analysis, AppSummary, ReviewPage, SyncResult
-from review_analyzer.scraper import GooglePlayClient, ReviewSource, UpstreamError
+from review_analyzer.scraper import (
+    AppNotFoundError,
+    GooglePlayClient,
+    ReviewSource,
+    UpstreamError,
+)
 from review_analyzer.service import NoReviewsError, ReviewService
 from review_analyzer.storage import ReviewRepository, init_db, make_engine
-from review_analyzer.summarizer import LazySummarizer
 
 MAX_SYNC_COUNT = 1000
 MAX_PAGE_SIZE = 500
@@ -32,6 +42,8 @@ CSV_COLUMNS = (
     "created_at",
     "app_version",
     "thumbs_up",
+    "text_sentiment",
+    "sentiment_score",
     "content",
 )
 
@@ -49,7 +61,9 @@ router = APIRouter()
 def get_service(request: Request) -> Iterator[ReviewService]:
     state = request.app.state
     with state.session_factory() as session:
-        yield ReviewService(state.source, ReviewRepository(session), state.summarizer)
+        yield ReviewService(
+            state.source, ReviewRepository(session), state.sentiment_model, state.embedder
+        )
 
 
 Service = Annotated[ReviewService, Depends(get_service)]
@@ -67,6 +81,12 @@ def search_apps(
     limit: Annotated[int, Query(ge=1, le=20)] = 5,
 ) -> list[AppSummary]:
     return service.search(q, limit)
+
+
+# Declared after /apps/search so "search" isn't taken for an app ID.
+@router.get("/apps/{app_id}")
+def get_app(service: Service, app_id: AppId) -> AppSummary:
+    return service.lookup(app_id)
 
 
 @router.post("/apps/{app_id}/sync")
@@ -120,12 +140,14 @@ def export_reviews(
 def create_app(
     settings: Settings | None = None,
     source: ReviewSource | None = None,
-    summarizer: Summarizer | None = None,
+    sentiment_model: SentimentModel | None = None,
+    embedder: Embedder | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     engine = make_engine(settings.database_url)
-    if summarizer is None and settings.enable_summarizer and LazySummarizer.available():
-        summarizer = LazySummarizer(settings.summarizer_model)
+    if settings.enable_ml and ml_available():
+        sentiment_model = sentiment_model or TransformerSentiment(settings.sentiment_model)
+        embedder = embedder or TransformerEmbedder(settings.embedding_model)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -136,14 +158,16 @@ def create_app(
     app = FastAPI(title="Review Analyzer API", version=__version__, lifespan=lifespan)
     app.state.session_factory = sessionmaker(engine, expire_on_commit=False)
     app.state.source = source or GooglePlayClient(settings.language, settings.country)
-    app.state.summarizer = summarizer
+    app.state.sentiment_model = sentiment_model
+    app.state.embedder = embedder
 
     @app.exception_handler(UpstreamError)
     async def upstream_error(request: Request, exc: UpstreamError) -> JSONResponse:
         return JSONResponse(status_code=502, content={"detail": str(exc)})
 
+    @app.exception_handler(AppNotFoundError)
     @app.exception_handler(NoReviewsError)
-    async def no_reviews(request: Request, exc: NoReviewsError) -> JSONResponse:
+    async def not_found(request: Request, exc: LookupError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
 
     app.include_router(router)
