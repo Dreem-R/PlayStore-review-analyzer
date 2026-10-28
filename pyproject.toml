@@ -1,6 +1,6 @@
 [project]
 name = "review-analyzer"
-version = "0.2.0"
+version = "0.3.0"
 description = "Collect Google Play reviews and surface sentiment, recurring complaints and suggested fixes."
 readme = "README.md"
 license = "MIT"
@@ -12,6 +12,9 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "google-play-scraper>=1.2.7",
+    "alembic>=1.20.1",
+    "numpy>=2.5.4",
+    "scikit-learn>=1.9.1",
 ]
 
 [project.optional-dependencies]
@@ -57,6 +60,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+# "a b c".split() reads better than a list literal for long word lists.
+ignore = ["SIM905"]
 
 [tool.mypy]
 strict = true
@@ -64,7 +69,7 @@ packages = ["review_analyzer"]
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["google_play_scraper.*", "transformers.*", "plotly.*", "pandas.*"]
+module = ["google_play_scraper.*", "torch.*", "transformers.*", "sklearn.*", "plotly.*", "pandas.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
