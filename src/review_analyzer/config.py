@@ -11,5 +11,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///data/reviews.db"
     language: str = "en"
     country: str = "us"
-    summarizer_model: str = "sshleifer/distilbart-cnn-6-6"
-    enable_summarizer: bool = True
+    # Models are only used when the `ml` extra is installed.
+    enable_ml: bool = True
+    sentiment_model: str = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
