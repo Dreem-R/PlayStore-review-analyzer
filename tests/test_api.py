@@ -3,7 +3,7 @@ import io
 
 from fastapi.testclient import TestClient
 
-from tests.conftest import APP_ID, FakeSentiment, FakeSource
+from tests.conftest import APP_ID, FakeEmbedder, FakeSentiment, FakeSource
 
 
 def sync(client: TestClient, count: int = 10) -> None:
@@ -71,21 +71,36 @@ def test_analysis_with_models(ml_client: TestClient) -> None:
     assert analysis["versions"][0]["version"] == "3.2.0"
 
 
-def test_sentiment_is_scored_once_and_stored(
-    ml_client: TestClient, sentiment_model: FakeSentiment
+def test_repeat_analysis_makes_no_model_calls(
+    ml_client: TestClient, sentiment_model: FakeSentiment, embedder: FakeEmbedder
 ) -> None:
     sync(ml_client)
-    stored = ml_client.get(f"/apps/{APP_ID}/reviews").json()["items"]
-    all_reviews = sorted(r["content"] for r in stored)
+    first = ml_client.get(f"/apps/{APP_ID}/analysis").json()
+    batches, embedded = len(sentiment_model.batches), embedder.calls
 
-    ml_client.get(f"/apps/{APP_ID}/analysis")
-    ml_client.get(f"/apps/{APP_ID}/analysis")
+    second = ml_client.get(f"/apps/{APP_ID}/analysis").json()
 
-    # Whole reviews are scored in one batch, once; later batches are complaint sentences.
-    review_batches = [b for b in sentiment_model.batches if sorted(b) == all_reviews]
-    assert len(review_batches) == 1
+    assert second == first
+    assert len(sentiment_model.batches) == batches
+    assert embedder.calls == embedded
     stored = ml_client.get(f"/apps/{APP_ID}/reviews").json()["items"]
     assert all(r["text_sentiment"] is not None for r in stored)
+
+
+def test_analysis_after_sync_only_scores_new_reviews(
+    ml_client: TestClient, sentiment_model: FakeSentiment
+) -> None:
+    sync(ml_client, count=5)
+    ml_client.get(f"/apps/{APP_ID}/analysis")
+    old = {r["content"] for r in ml_client.get(f"/apps/{APP_ID}/reviews").json()["items"]}
+    seen = len(sentiment_model.batches)
+
+    sync(ml_client, count=10)
+    ml_client.get(f"/apps/{APP_ID}/analysis")
+
+    new_texts = {t for batch in sentiment_model.batches[seen:] for t in batch}
+    assert new_texts
+    assert not new_texts & old
 
 
 def test_analysis_limit_uses_most_recent_reviews(client: TestClient) -> None:

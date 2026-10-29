@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import sessionmaker
 
 from review_analyzer import __version__
+from review_analyzer.cache import CachedEmbedder, CachedSentimentModel
 from review_analyzer.config import Settings
 from review_analyzer.ml import (
     Embedder,
@@ -30,7 +31,7 @@ from review_analyzer.scraper import (
     UpstreamError,
 )
 from review_analyzer.service import NoReviewsError, ReviewService
-from review_analyzer.storage import ReviewRepository, init_db, make_engine
+from review_analyzer.storage import ModelOutputCache, ReviewRepository, init_db, make_engine
 
 MAX_SYNC_COUNT = 1000
 MAX_PAGE_SIZE = 500
@@ -61,9 +62,12 @@ router = APIRouter()
 def get_service(request: Request) -> Iterator[ReviewService]:
     state = request.app.state
     with state.session_factory() as session:
-        yield ReviewService(
-            state.source, ReviewRepository(session), state.sentiment_model, state.embedder
+        cache = ModelOutputCache(session)
+        sentiment_model = (
+            CachedSentimentModel(state.sentiment_model, cache) if state.sentiment_model else None
         )
+        embedder = CachedEmbedder(state.embedder, cache) if state.embedder else None
+        yield ReviewService(state.source, ReviewRepository(session), sentiment_model, embedder)
 
 
 Service = Annotated[ReviewService, Depends(get_service)]

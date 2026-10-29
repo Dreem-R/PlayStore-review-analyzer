@@ -1,15 +1,20 @@
 """SQLite persistence for fetched reviews, so repeat analyses don't hit the Play Store."""
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
+import numpy as np
 from alembic import command
 from alembic.config import Config
+from numpy.typing import NDArray
 from sqlalchemy import (
     Engine,
     Float,
     Index,
+    LargeBinary,
+    String,
     Text,
     create_engine,
     func,
@@ -18,6 +23,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy.pool import StaticPool
 
@@ -47,6 +53,23 @@ class ReviewRow(Base):
     fetched_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
     text_sentiment: Mapped[str | None]
     sentiment_score: Mapped[float | None] = mapped_column(Float)
+
+
+class SentimentCacheRow(Base):
+    __tablename__ = "sentiment_cache"
+
+    model: Mapped[str] = mapped_column(primary_key=True)
+    text_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    label: Mapped[str]
+    score: Mapped[float] = mapped_column(Float)
+
+
+class EmbeddingCacheRow(Base):
+    __tablename__ = "embedding_cache"
+
+    model: Mapped[str] = mapped_column(primary_key=True)
+    text_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    vector: Mapped[bytes] = mapped_column(LargeBinary)
 
 
 def make_engine(database_url: str) -> Engine:
@@ -129,3 +152,70 @@ class ReviewRepository:
             .offset(offset)
         )
         return [Review.model_validate(row) for row in self._session.scalars(stmt)]
+
+
+def _chunks(items: Sequence[str], size: int = 500) -> Iterator[Sequence[str]]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+class ModelOutputCache:
+    """Model outputs keyed by (model name, SHA-256 of the input text)."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def sentiments(self, model: str, hashes: Collection[str]) -> dict[str, tuple[Sentiment, float]]:
+        found: dict[str, tuple[Sentiment, float]] = {}
+        for chunk in _chunks(sorted(hashes)):
+            rows = self._session.scalars(
+                select(SentimentCacheRow).where(
+                    SentimentCacheRow.model == model, SentimentCacheRow.text_hash.in_(chunk)
+                )
+            )
+            found |= {row.text_hash: (cast(Sentiment, row.label), row.score) for row in rows}
+        return found
+
+    def save_sentiments(self, model: str, outputs: dict[str, tuple[Sentiment, float]]) -> None:
+        self._insert_ignoring_duplicates(
+            SentimentCacheRow.__table__,
+            [
+                {"model": model, "text_hash": h, "label": label, "score": score}
+                for h, (label, score) in outputs.items()
+            ],
+        )
+
+    def embeddings(self, model: str, hashes: Collection[str]) -> dict[str, NDArray[np.float32]]:
+        found: dict[str, NDArray[np.float32]] = {}
+        for chunk in _chunks(sorted(hashes)):
+            rows = self._session.scalars(
+                select(EmbeddingCacheRow).where(
+                    EmbeddingCacheRow.model == model, EmbeddingCacheRow.text_hash.in_(chunk)
+                )
+            )
+            found |= {row.text_hash: np.frombuffer(row.vector, dtype=np.float32) for row in rows}
+        return found
+
+    def save_embeddings(self, model: str, outputs: dict[str, NDArray[np.float32]]) -> None:
+        self._insert_ignoring_duplicates(
+            EmbeddingCacheRow.__table__,
+            [
+                {"model": model, "text_hash": h, "vector": v.astype(np.float32).tobytes()}
+                for h, v in outputs.items()
+            ],
+        )
+
+    def _insert_ignoring_duplicates(self, table: Any, rows: list[dict[str, Any]]) -> None:
+        # Two concurrent analyses can compute the same text; the second insert is a no-op.
+        if not rows:
+            return
+        dialect = self._session.get_bind().dialect.name
+        statement: Any
+        if dialect == "sqlite":
+            statement = sqlite.insert(table)
+        elif dialect == "postgresql":
+            statement = postgresql.insert(table)
+        else:
+            raise NotImplementedError(f"Model output cache doesn't support {dialect}")
+        self._session.execute(statement.on_conflict_do_nothing(), rows)
+        self._session.commit()
