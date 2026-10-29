@@ -5,7 +5,6 @@ services:
       - "8000:8000"
     volumes:
       - data:/app/data
-      - model-cache:/app/.cache
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 5s
@@ -24,4 +23,3 @@ services:
 
 volumes:
   data:
-  model-cache:
