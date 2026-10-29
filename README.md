@@ -26,6 +26,7 @@ flowchart LR
 
 - **Sync and analyze are separate steps.** `POST /apps/{id}/sync` fetches the newest reviews and upserts them. Analysis reads only from the database, so it's repeatable and covers more history as you sync more.
 - **Sentiment is scored once and stored.** Scoring happens on the first analysis rather than during sync, so syncs stay fast. Reviews stored before the model was installed get scored too. Editing a review clears its score.
+- **Model outputs are cached in the database.** Profiling showed sentence-level sentiment was over 90% of an analysis's time. Both models are wrapped in a cache keyed by model name and a SHA-256 of the input text, so a repeat analysis makes no model calls, and analyzing after a sync only pays for the new reviews. Edited reviews (new text) and model changes miss the cache automatically.
 - **The ML dependency is optional.** torch and transformers are in an `ml` extra. Without them, analysis falls back to rating-based sentiment and keyword categories. CI runs without them: the models sit behind small `SentimentModel` and `Embedder` protocols, and the tests use deterministic fakes.
 - **Schema changes go through Alembic migrations,** applied on startup. Databases created before migrations existed are detected and upgraded in place, and a test checks that the migrations match the ORM models.
 
@@ -38,6 +39,17 @@ flowchart LR
 5. **Versions.** Reviews are grouped by the app version they were written on (versions with at least 5 reviews), ordered numerically, so 3.10 comes after 3.9.
 
 The 0.6 distance threshold was picked by comparing clusters on 500 live Spotify reviews. At 0.5, ads complaints split into near-duplicate groups. At 0.7, 42% of complaints merged into one catch-all group.
+
+### Performance
+
+500 live reviews per app on a laptop CPU, models already loaded (repeat analysis on Spotify, first analysis on WhatsApp):
+
+| | Before | After |
+|---|---|---|
+| Repeat analysis (nothing new synced) | 26.5 s | 0.3 s |
+| First analysis of 500 new reviews | 26.4 s | 18.3 s |
+
+The repeat-analysis gain comes from the model-output cache. The first-analysis gain comes from sorting texts by length before batching: each batch is padded to its longest text, so mixing one-liners with paragraphs wasted most of the compute. Results are identical either way: same labels, and embeddings within 1e-7.
 
 ### What the text model adds
 
@@ -77,7 +89,7 @@ With Docker:
 docker compose up --build
 ```
 
-The UI is at http://localhost:8501 and the API at http://localhost:8000/docs. The first analysis downloads the two models (about 600 MB) into a Docker volume.
+The UI is at http://localhost:8501 and the API at http://localhost:8000/docs. The two models (about 600 MB) are downloaded into the image at build time, so the containers never call the Hugging Face Hub at runtime.
 
 Locally with [uv](https://docs.astral.sh/uv/):
 
@@ -113,20 +125,22 @@ src/review_analyzer/
   api.py          FastAPI app and routes
   service.py      sync / lookup / analyze use cases; scores and stores sentiment
   scraper.py      Play Store client behind the ReviewSource protocol
-  storage.py      SQLAlchemy model, repository, migration runner
+  storage.py      SQLAlchemy models, repositories, migration runner
+  cache.py        model wrappers that memoize outputs in the database
   migrations/     Alembic migrations
   analysis.py     complaints, issues, mismatches, version stats
   clustering.py   agglomerative clustering and c-TF-IDF labels
   categories.py   known issue categories and suggested fixes
   ml.py           lazily loaded sentiment and embedding models
   ui/app.py       Streamlit frontend
-tests/            unit, API and migration tests with fake models and a fake review source
+scripts/          download_models.py, used by the Dockerfile to bake models into the image
+tests/            unit, API, cache and migration tests with fake models and a fake review source
 ```
 
 ## Limitations
 
 - Text sentiment comes from a general-purpose model, not one trained on app reviews. It struggles with sarcasm, very short reviews and non-English text.
-- The first analysis of 500 new reviews takes 30–40 seconds on CPU, most of it sentiment scoring. Sentence-level scores and embeddings aren't cached yet, so later analyses still take around 15 seconds.
+- The first analysis of 500 new reviews takes about 20 seconds on CPU, and the request blocks while it runs. A background job with progress reporting would be the next step for larger syncs.
 - Only English reviews from the US store are requested, but some non-English reviews come through anyway.
 - google-play-scraper is unofficial and returns the top "featured" search result without an ID. The client recovers it from the search page, which will break if Google changes that page.
 
