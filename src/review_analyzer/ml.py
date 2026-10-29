@@ -18,12 +18,16 @@ SENTIMENT_LABELS: frozenset[str] = frozenset({"positive", "neutral", "negative"}
 
 
 class SentimentModel(Protocol):
+    model_name: str
+
     def predict(self, texts: Sequence[str]) -> list[tuple[Sentiment, float]]:
         """Return (label, confidence) for each text."""
         ...
 
 
 class Embedder(Protocol):
+    model_name: str
+
     def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
         """Return one L2-normalized row per text."""
         ...
@@ -33,9 +37,16 @@ def ml_available() -> bool:
     return all(importlib.util.find_spec(m) is not None for m in ("torch", "transformers"))
 
 
-def _batches(items: Sequence[str], size: int) -> Iterator[list[str]]:
-    for start in range(0, len(items), size):
-        yield list(items[start : start + size])
+def _batches_by_length(texts: Sequence[str], size: int) -> Iterator[tuple[list[int], list[str]]]:
+    """Yield (original indices, texts) batches of similar length.
+
+    Each batch is padded to its longest text, so mixing a one-liner with a
+    paragraph wastes most of the compute. Sorting first roughly halves inference time.
+    """
+    order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
+    for start in range(0, len(order), size):
+        indices = order[start : start + size]
+        yield indices, [texts[i] for i in indices]
 
 
 class _LazyTransformer:
@@ -86,15 +97,13 @@ class TransformerSentiment(_LazyTransformer):
         import torch
 
         self._ensure_loaded()
-        predictions: list[tuple[Sentiment, float]] = []
-        for batch in _batches(texts, self.batch_size):
+        predictions: list[tuple[Sentiment, float]] = [("neutral", 0.0)] * len(texts)
+        for indices, batch in _batches_by_length(texts, self.batch_size):
             with torch.no_grad():
                 probs = self._model(**self._tokenize(batch)).logits.softmax(dim=-1)
             scores, ids = probs.max(dim=-1)
-            predictions += [
-                (self._labels[i], round(s, 4))
-                for i, s in zip(ids.tolist(), scores.tolist(), strict=True)
-            ]
+            for index, label_id, score in zip(indices, ids.tolist(), scores.tolist(), strict=True):
+                predictions[index] = (self._labels[label_id], round(score, 4))
         return predictions
 
 
@@ -111,16 +120,19 @@ class TransformerEmbedder(_LazyTransformer):
         import torch
 
         self._ensure_loaded()
-        chunks: list[NDArray[np.float32]] = []
-        for batch in _batches(texts, self.batch_size):
+        if not texts:
+            return np.zeros((0, 0), dtype=np.float32)
+        vectors: NDArray[np.float32] | None = None
+        for indices, batch in _batches_by_length(texts, self.batch_size):
             inputs = self._tokenize(batch)
             with torch.no_grad():
                 hidden = self._model(**inputs).last_hidden_state
             # Mean-pool over real tokens (not padding), then normalize for cosine similarity.
             mask = inputs["attention_mask"].unsqueeze(-1).to(hidden.dtype)
             pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
-            pooled = torch.nn.functional.normalize(pooled, dim=-1)
-            chunks.append(pooled.numpy().astype(np.float32))
-        if not chunks:
-            return np.zeros((0, 0), dtype=np.float32)
-        return np.vstack(chunks)
+            pooled = torch.nn.functional.normalize(pooled, dim=-1).numpy().astype(np.float32)
+            if vectors is None:
+                vectors = np.zeros((len(texts), pooled.shape[1]), dtype=np.float32)
+            vectors[indices] = pooled
+        assert vectors is not None
+        return vectors
