@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Abstractive summary fallback. Heavy (torch), so the API runs without it.
+# Text sentiment and sentence embeddings. Heavy (torch), so the API runs without it.
 ml = [
     "transformers>=5.20",
     "torch>=2.14",
