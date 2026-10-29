@@ -44,6 +44,8 @@ class FakeSource:
 class FakeSentiment:
     """Keyword rules instead of a transformer. Records every batch it scores."""
 
+    model_name = "fake-sentiment"
+
     NEGATIVE = ("crash", "ads", " ad ", "can't", "slow", "lost", "terrible", "nobody")
     POSITIVE = ("love", "great", "clean", "good", "never had a problem")
 
@@ -63,20 +65,31 @@ class FakeSentiment:
 
 
 class FakeEmbedder:
-    """Puts sentences about the same topic on the same axis, so clustering is predictable."""
+    """Puts sentences about the same topic on the same axis, so clustering is predictable.
+
+    Vectors are fixed-width so they can be cached and stacked across calls.
+    """
+
+    model_name = "fake-embedder"
+    WIDTH = 64
 
     TOPICS = (("crash", "slow", "freez"), ("ads", " ad "), ("log in", "verification"))
 
+    def __init__(self) -> None:
+        self.calls = 0
+
     def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
-        vectors = np.zeros((len(texts), len(self.TOPICS) + len(texts)), dtype=np.float32)
+        self.calls += len(texts)
+        vectors = np.zeros((len(texts), self.WIDTH), dtype=np.float32)
         for row, text in enumerate(texts):
             padded = f" {text.lower()} "
             topic = next(
                 (i for i, words in enumerate(self.TOPICS) if any(w in padded for w in words)),
                 None,
             )
-            # Off-topic sentences each get their own axis, so they never cluster.
-            vectors[row, topic if topic is not None else len(self.TOPICS) + row] = 1.0
+            # Off-topic sentences get an axis from their text, so they don't cluster together.
+            axis = topic if topic is not None else 3 + sum(map(ord, text)) % (self.WIDTH - 3)
+            vectors[row, axis] = 1.0
         return vectors
 
 
@@ -117,6 +130,13 @@ def client(source: FakeSource) -> Iterator[TestClient]:
 
 
 @pytest.fixture
-def ml_client(source: FakeSource, sentiment_model: FakeSentiment) -> Iterator[TestClient]:
+def embedder() -> FakeEmbedder:
+    return FakeEmbedder()
+
+
+@pytest.fixture
+def ml_client(
+    source: FakeSource, sentiment_model: FakeSentiment, embedder: FakeEmbedder
+) -> Iterator[TestClient]:
     """API with fake models: text sentiment and clustering."""
-    yield from _client(source, sentiment_model=sentiment_model, embedder=FakeEmbedder())
+    yield from _client(source, sentiment_model=sentiment_model, embedder=embedder)

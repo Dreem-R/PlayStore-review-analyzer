@@ -1,8 +1,11 @@
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, inspect, text
 
-from review_analyzer.storage import Base, init_db, make_engine
+from review_analyzer.storage import MIGRATIONS_DIR, Base, init_db, make_engine
+
+HEAD = ScriptDirectory(str(MIGRATIONS_DIR)).get_current_head()
 
 
 def columns(engine: Engine) -> set[str]:
@@ -47,6 +50,5 @@ def test_upgrades_database_created_before_migrations() -> None:
     assert {"text_sentiment", "sentiment_score"} <= columns(engine)
     with engine.connect() as connection:
         assert connection.execute(text("SELECT count(*) FROM reviews")).scalar() == 1
-        assert (
-            connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0002"
-        )
+        version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        assert version == HEAD
