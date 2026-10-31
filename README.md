@@ -4,12 +4,12 @@
 
 Pulls recent Google Play reviews for any app, stores them, and reports what users are unhappy about:
 
-- **Recurring complaints**, found by clustering complaint sentences by meaning rather than from a fixed keyword list.
+- **Recurring complaints**, found by clustering complaint sentences by meaning rather than from a fixed keyword list. Each issue opens to every review behind it, most helpful first, with the sentences that raised it highlighted.
 - **Sentiment from the review text**, compared against the star rating.
 - **Complaints hidden in high ratings**: 4–5 star reviews whose text is clearly negative.
 - **How each release changed things**: negative share and issue counts per app version.
 
-**Live demo:** https://playstore-review-analyzer.streamlit.app (it may take a minute to wake up if nobody has used it recently).
+**Live demo:** https://playstore-review-analyzer-ruchak.streamlit.app (if nobody has used it recently it needs waking up, which can take a few minutes).
 
 It is split into a FastAPI service that owns scraping, storage and analysis, and a Streamlit frontend. The frontend talks to the API, or runs the same service in-process where only one process is allowed, as on the hosted demo.
 
