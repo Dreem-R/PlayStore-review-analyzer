@@ -39,9 +39,20 @@ class ReviewPage(BaseModel):
 
 class SyncResult(BaseModel):
     app_id: str
+    status: Literal["fetched", "fresh", "stale"] = Field(
+        description=(
+            "fetched: reviews were just fetched. fresh: the stored reviews are recent enough, "
+            "so nothing was fetched. stale: fetching failed or was rate-limited, so the "
+            "stored reviews are older than usual."
+        )
+    )
     fetched: int
     new: int
     total_stored: int
+    last_synced_at: datetime | None = Field(
+        default=None, description="When reviews were last fetched for this app (UTC)."
+    )
+    message: str | None = Field(default=None, description="Why a fetch was skipped or failed.")
 
 
 class SentimentCounts(BaseModel):

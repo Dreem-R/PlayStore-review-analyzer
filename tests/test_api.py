@@ -43,7 +43,8 @@ def test_analysis_before_sync_is_404(client: TestClient) -> None:
 def test_sync_reports_new_reviews(client: TestClient) -> None:
     first = client.post(f"/apps/{APP_ID}/sync", params={"count": 5}).json()
     second = client.post(f"/apps/{APP_ID}/sync", params={"count": 10}).json()
-    assert first == {"app_id": APP_ID, "fetched": 5, "new": 5, "total_stored": 5}
+    assert first["status"] == "fetched"
+    assert (first["fetched"], first["new"], first["total_stored"]) == (5, 5, 5)
     assert second["new"] == 5
     assert second["total_stored"] == 10
 

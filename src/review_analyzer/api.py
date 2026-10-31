@@ -3,50 +3,24 @@
 Run with: uvicorn review_analyzer.api:create_app --factory
 """
 
-import csv
-import io
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Path, Query, Request
 from fastapi.responses import JSONResponse, Response
-from sqlalchemy.orm import sessionmaker
 
 from review_analyzer import __version__
-from review_analyzer.cache import CachedEmbedder, CachedSentimentModel
 from review_analyzer.config import Settings
-from review_analyzer.ml import (
-    Embedder,
-    SentimentModel,
-    TransformerEmbedder,
-    TransformerSentiment,
-    ml_available,
-)
+from review_analyzer.ml import Embedder, SentimentModel
+from review_analyzer.runtime import Runtime, build_runtime
 from review_analyzer.schemas import Analysis, AppSummary, ReviewPage, SyncResult
-from review_analyzer.scraper import (
-    AppNotFoundError,
-    GooglePlayClient,
-    ReviewSource,
-    UpstreamError,
-)
-from review_analyzer.service import NoReviewsError, ReviewService
-from review_analyzer.storage import ModelOutputCache, ReviewRepository, init_db, make_engine
+from review_analyzer.scraper import AppNotFoundError, ReviewSource, UpstreamError
+from review_analyzer.service import NoReviewsError, RateLimitedError, ReviewService
 
 MAX_SYNC_COUNT = 1000
 MAX_PAGE_SIZE = 500
 MAX_ANALYSIS_REVIEWS = 5000
-CSV_COLUMNS = (
-    "review_id",
-    "user_name",
-    "rating",
-    "created_at",
-    "app_version",
-    "thumbs_up",
-    "text_sentiment",
-    "sentiment_score",
-    "content",
-)
 
 AppId = Annotated[
     str,
@@ -60,14 +34,9 @@ router = APIRouter()
 
 
 def get_service(request: Request) -> Iterator[ReviewService]:
-    state = request.app.state
-    with state.session_factory() as session:
-        cache = ModelOutputCache(session)
-        sentiment_model = (
-            CachedSentimentModel(state.sentiment_model, cache) if state.sentiment_model else None
-        )
-        embedder = CachedEmbedder(state.embedder, cache) if state.embedder else None
-        yield ReviewService(state.source, ReviewRepository(session), sentiment_model, embedder)
+    runtime: Runtime = request.app.state.runtime
+    with runtime.service() as service:
+        yield service
 
 
 Service = Annotated[ReviewService, Depends(get_service)]
@@ -98,9 +67,14 @@ def sync_reviews(
     service: Service,
     app_id: AppId,
     count: Annotated[int, Query(ge=1, le=MAX_SYNC_COUNT)] = 100,
+    force: Annotated[bool, Query(description="Fetch even if recent reviews are stored.")] = False,
 ) -> SyncResult:
-    """Fetch the newest reviews from the Play Store and store them."""
-    return service.sync(app_id, count)
+    """Fetch the newest reviews from the Play Store and store them.
+
+    Skipped (status "fresh") when at least `count` reviews were fetched recently.
+    If fetching fails but older reviews are stored, returns status "stale".
+    """
+    return service.sync(app_id, count, force=force)
 
 
 @router.get("/apps/{app_id}/reviews")
@@ -129,13 +103,8 @@ def export_reviews(
     app_id: AppId,
     limit: Annotated[int, Query(ge=1, le=MAX_ANALYSIS_REVIEWS)] = 1000,
 ) -> Response:
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=CSV_COLUMNS, extrasaction="ignore")
-    writer.writeheader()
-    for review in service.reviews(app_id, limit, 0).items:
-        writer.writerow(review.model_dump())
     return Response(
-        buffer.getvalue(),
+        service.export_csv(app_id, limit),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{app_id}_reviews.csv"'},
     )
@@ -147,27 +116,24 @@ def create_app(
     sentiment_model: SentimentModel | None = None,
     embedder: Embedder | None = None,
 ) -> FastAPI:
-    settings = settings or Settings()
-    engine = make_engine(settings.database_url)
-    if settings.enable_ml and ml_available():
-        sentiment_model = sentiment_model or TransformerSentiment(settings.sentiment_model)
-        embedder = embedder or TransformerEmbedder(settings.embedding_model)
+    runtime = build_runtime(settings, source, sentiment_model, embedder)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        init_db(engine)
+        runtime.start_preload()
         yield
-        engine.dispose()
+        runtime.engine.dispose()
 
     app = FastAPI(title="Review Analyzer API", version=__version__, lifespan=lifespan)
-    app.state.session_factory = sessionmaker(engine, expire_on_commit=False)
-    app.state.source = source or GooglePlayClient(settings.language, settings.country)
-    app.state.sentiment_model = sentiment_model
-    app.state.embedder = embedder
+    app.state.runtime = runtime
 
     @app.exception_handler(UpstreamError)
     async def upstream_error(request: Request, exc: UpstreamError) -> JSONResponse:
         return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+    @app.exception_handler(RateLimitedError)
+    async def rate_limited(request: Request, exc: RateLimitedError) -> JSONResponse:
+        return JSONResponse(status_code=429, content={"detail": str(exc)})
 
     @app.exception_handler(AppNotFoundError)
     @app.exception_handler(NoReviewsError)
