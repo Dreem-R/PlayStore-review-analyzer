@@ -80,7 +80,7 @@ class HttpBackend:
         return result
 
     def reviews(self, app_id: str, limit: int) -> list[dict[str, Any]]:
-        page = self._call("GET", f"/apps/{app_id}/reviews", limit=min(limit, 500))
+        page = self._call("GET", f"/apps/{app_id}/reviews", limit=limit)
         items: list[dict[str, Any]] = page["items"]
         return items
 

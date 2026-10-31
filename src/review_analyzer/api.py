@@ -19,7 +19,7 @@ from review_analyzer.scraper import AppNotFoundError, ReviewSource, UpstreamErro
 from review_analyzer.service import NoReviewsError, RateLimitedError, ReviewService
 
 MAX_SYNC_COUNT = 1000
-MAX_PAGE_SIZE = 500
+MAX_PAGE_SIZE = MAX_SYNC_COUNT
 MAX_ANALYSIS_REVIEWS = 5000
 
 AppId = Annotated[

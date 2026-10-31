@@ -82,3 +82,17 @@ def test_play_store_outage_shows_a_friendly_message(app: AppTest, source: FakeSo
     assert not app.exception
     assert "isn't answering this demo right now" in app.error[0].value
     assert "Example Notes" in app.info[0].value
+
+
+def test_read_all_reviews_of_an_issue(app: AppTest) -> None:
+    app.text_input(key="query").set_value("notes").run()
+    app.button[0].click().run()
+    read_all = next(b for b in app.button if b.label.startswith("Read all"))
+
+    read_all.click().run()
+
+    assert not app.exception
+    shown = [m.value for m in app.markdown]
+    # Full reviews, with the sentence that put each one in this issue highlighted.
+    assert any(":orange-background[" in text for text in shown)
+    assert any("found this helpful" in c.value for c in app.caption)
