@@ -22,6 +22,8 @@ DEFAULT_COUNT = 200
 SENTIMENT_COLORS = {"Positive": "#4B8BBE", "Neutral": "#F28C38", "Negative": "#D9534F"}
 PACKAGE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$")
 PLAY_STORE_LINK = re.compile(r"[?&]id=([A-Za-z][\w.]+)")
+# Characters Streamlit's markdown would otherwise treat as formatting, LaTeX ($) or emoji (:).
+MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|$~<>:])")
 
 
 @st.cache_resource(show_spinner="Starting up...")
@@ -133,19 +135,75 @@ def render_sentiment(analysis: dict[str, Any]) -> None:
     st.plotly_chart(fig, width="stretch")
 
 
-def render_issues(analysis: dict[str, Any]) -> None:
+def escape_markdown(text: str) -> str:
+    return MARKDOWN_SPECIAL.sub(r"\\\1", text)
+
+
+def highlight(content: str, sentences: list[str]) -> str:
+    """The review as markdown, with the sentences that raised the issue highlighted.
+
+    Sentences were whitespace-normalized when the review was split, so the review is too.
+    """
+    text = " ".join(content.split())
+    spans = []
+    for sentence in sentences:
+        start = text.find(sentence)
+        if start >= 0:
+            spans.append((start, start + len(sentence)))
+    parts, position = [], 0
+    for start, end in sorted(spans):
+        if start < position:  # overlaps a span already highlighted
+            continue
+        parts.append(escape_markdown(text[position:start]))
+        parts.append(f":orange-background[{escape_markdown(text[start:end])}]")
+        position = end
+    parts.append(escape_markdown(text[position:]))
+    return "".join(parts)
+
+
+def review_header(review: dict[str, Any]) -> str:
+    details = ["★" * review["rating"] + "☆" * (5 - review["rating"])]
+    if review["app_version"]:
+        details.append(f"v{review['app_version']}")
+    details.append(review["created_at"][:10])
+    if review["thumbs_up"]:
+        details.append(f"{review['thumbs_up']} found this helpful")
+    return " · ".join(details)
+
+
+@st.dialog("Reviews raising this issue", width="large")
+def show_issue_reviews(issue: dict[str, Any], reviews_by_id: dict[str, dict[str, Any]]) -> None:
+    st.markdown(f"**{escape_markdown(issue['label'])}**")
+    st.caption(
+        f"{issue['reviews']} reviews, most helpful first. "
+        "Highlighted: the sentences grouped into this issue."
+    )
+    for member in issue["members"]:
+        review = reviews_by_id.get(member["review_id"])
+        if review is None:
+            continue
+        st.caption(review_header(review))
+        st.markdown(highlight(review["content"], member["sentences"]))
+        st.divider()
+
+
+def render_issues(analysis: dict[str, Any], reviews: list[dict[str, Any]]) -> None:
     if not analysis["issues"]:
         st.info("No recurring complaints found.")
         return
     if analysis["issue_method"] == "keywords":
         st.caption("Grouped by keyword category (the ML extra isn't installed).")
-    for issue in analysis["issues"]:
-        title = f"**{issue['label']}** · {issue['reviews']} reviews ({issue['share']:.0%})"
+    reviews_by_id = {review["review_id"]: review for review in reviews}
+    for index, issue in enumerate(analysis["issues"]):
+        label = escape_markdown(issue["label"])
+        title = f"**{label}** · {issue['reviews']} reviews ({issue['share']:.0%})"
         with st.expander(title):
             if issue["suggestion"]:
                 st.markdown(f"*{issue['category']}:* {issue['suggestion']}")
             for example in issue["examples"]:
-                st.markdown(f"> {example}")
+                st.markdown(f"> {escape_markdown(example)}")
+            if st.button(f"Read all {issue['reviews']} reviews", key=f"issue-{index}"):
+                show_issue_reviews(issue, reviews_by_id)
 
 
 def render_versions(analysis: dict[str, Any]) -> None:
@@ -184,7 +242,7 @@ def render_mismatches(analysis: dict[str, Any]) -> None:
     st.subheader("Complaints hidden in high ratings")
     st.caption("Rated 4-5 stars, but the text is clearly negative. Star averages miss these.")
     for review in analysis["mismatches"]:
-        st.markdown(f"> {'★' * review['rating']} {review['content']}")
+        st.markdown(f"> {'★' * review['rating']} {escape_markdown(review['content'])}")
 
 
 def render_result(result: dict[str, Any]) -> None:
@@ -196,7 +254,7 @@ def render_result(result: dict[str, Any]) -> None:
     render_sentiment(analysis)
 
     st.subheader("Recurring complaints")
-    render_issues(analysis)
+    render_issues(analysis, result["reviews"])
 
     st.subheader("By app version")
     render_versions(analysis)
