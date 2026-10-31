@@ -24,6 +24,7 @@ class FakeSource:
     def __init__(self, reviews: list[Review]) -> None:
         self.reviews = reviews
         self.fail = False
+        self.fetches: list[tuple[str, int]] = []
 
     def search(self, query: str, limit: int) -> list[AppSummary]:
         if self.fail:
@@ -36,6 +37,7 @@ class FakeSource:
         return AppSummary(app_id=APP_ID, title="Example Notes")
 
     def fetch_reviews(self, app_id: str, count: int) -> list[Review]:
+        self.fetches.append((app_id, count))
         if self.fail:
             raise UpstreamError(f"Fetching reviews for {app_id} failed: timeout")
         return [r for r in self.reviews if r.app_id == app_id][:count]
