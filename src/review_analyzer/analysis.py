@@ -9,7 +9,7 @@
 
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from statistics import mean
 from typing import Literal
@@ -20,6 +20,7 @@ from review_analyzer.ml import Embedder, SentimentModel
 from review_analyzer.schemas import (
     Analysis,
     Issue,
+    IssueReview,
     Review,
     Sentiment,
     SentimentCounts,
@@ -133,13 +134,29 @@ def complaint_sentences(
     return [s for s, (label, _) in zip(sentences, predictions, strict=True) if label != "positive"]
 
 
+def helpfulness_rank(reviews: Sequence[Review]) -> dict[str, int]:
+    """Position of each review when sorted most helpful first, then newest first."""
+    ordered = sorted(reviews, key=lambda r: (r.thumbs_up, r.created_at), reverse=True)
+    return {r.review_id: i for i, r in enumerate(ordered)}
+
+
 def build_issue(
     label: str,
     sentences: Sequence[ComplaintSentence],
     examples: list[str],
     complaint_count: int,
+    rank: Mapping[str, int],
 ) -> Issue:
     version_by_review = {s.review_id: s.version for s in sentences}
+    sentences_by_review: dict[str, list[str]] = defaultdict(list)
+    for sentence in sentences:
+        sentences_by_review[sentence.review_id].append(sentence.text)
+    members = [
+        IssueReview(review_id=review_id, sentences=texts)
+        for review_id, texts in sorted(
+            sentences_by_review.items(), key=lambda item: rank.get(item[0], len(rank))
+        )
+    ]
     categories = Counter(c for s in sentences if (c := categorize(s.text)))
     category = None
     if categories:
@@ -154,6 +171,7 @@ def build_issue(
         share=round(len(version_by_review) / max(complaint_count, 1), 3),
         examples=examples,
         by_version=dict(Counter(v for v in version_by_review.values() if v)),
+        members=members,
     )
 
 
@@ -167,6 +185,7 @@ def clustered_issues(
     sentences: Sequence[ComplaintSentence],
     embedder: Embedder,
     complaint_count: int,
+    rank: Mapping[str, int],
 ) -> list[Issue]:
     embeddings = embedder.encode([s.text for s in sentences])
     groups: dict[int, list[int]] = defaultdict(list)
@@ -190,18 +209,23 @@ def clustered_issues(
             [sentences[i] for i in members],
             [sentences[i].text for i in representatives(embeddings, members, EXAMPLES_PER_ISSUE)],
             complaint_count,
+            rank,
         )
         for members, label in zip(kept, labels, strict=True)
     ]
 
 
-def keyword_issues(sentences: Sequence[ComplaintSentence], complaint_count: int) -> list[Issue]:
+def keyword_issues(
+    sentences: Sequence[ComplaintSentence], complaint_count: int, rank: Mapping[str, int]
+) -> list[Issue]:
     by_category: dict[str, list[ComplaintSentence]] = defaultdict(list)
     for sentence in sentences:
         if category := categorize(sentence.text):
             by_category[category].append(sentence)
     issues = [
-        build_issue(name, group, [s.text for s in group[:EXAMPLES_PER_ISSUE]], complaint_count)
+        build_issue(
+            name, group, [s.text for s in group[:EXAMPLES_PER_ISSUE]], complaint_count, rank
+        )
         for name, group in by_category.items()
     ]
     issues.sort(key=lambda i: i.reviews, reverse=True)
@@ -216,14 +240,15 @@ def analyze(
 ) -> Analysis:
     complaints = [r for r in reviews if is_complaint(r)]
     sentences = complaint_sentences(complaints, sentiment_model)
+    rank = helpfulness_rank(complaints)
 
     method: Literal["clustering", "keywords"]
     if embedder is not None and len(sentences) >= 2:
         method = "clustering"
-        issues = clustered_issues(app_id, sentences, embedder, len(complaints))
+        issues = clustered_issues(app_id, sentences, embedder, len(complaints), rank)
     else:
         method = "keywords"
-        issues = keyword_issues(sentences, len(complaints))
+        issues = keyword_issues(sentences, len(complaints), rank)
 
     scored = [r.text_sentiment for r in reviews if r.text_sentiment is not None]
     return Analysis(
