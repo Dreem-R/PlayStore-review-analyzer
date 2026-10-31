@@ -9,13 +9,16 @@ Pulls recent Google Play reviews for any app, stores them, and reports what user
 - **Complaints hidden in high ratings**: 4–5 star reviews whose text is clearly negative.
 - **How each release changed things**: negative share and issue counts per app version.
 
-It is split into a FastAPI service that owns scraping, storage and analysis, and a Streamlit frontend that only talks to the API.
+**Live demo:** https://playstore-review-analyzer.streamlit.app (it may take a minute to wake up if nobody has used it recently).
+
+It is split into a FastAPI service that owns scraping, storage and analysis, and a Streamlit frontend. The frontend talks to the API, or runs the same service in-process where only one process is allowed, as on the hosted demo.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     UI[Streamlit UI] -->|HTTP| API[FastAPI service]
+    UI -.->|in-process on the hosted demo| Service
     API --> Service[ReviewService]
     Service --> Scraper[GooglePlayClient] --> Play[(Google Play)]
     Service --> Repo[ReviewRepository] --> DB[(SQLite)]
@@ -28,6 +31,7 @@ flowchart LR
 - **Sentiment is scored once and stored.** Scoring happens on the first analysis rather than during sync, so syncs stay fast. Reviews stored before the model was installed get scored too. Editing a review clears its score.
 - **Model outputs are cached in the database.** Profiling showed sentence-level sentiment was over 90% of an analysis's time. Both models are wrapped in a cache keyed by model name and a SHA-256 of the input text, so a repeat analysis makes no model calls, and analyzing after a sync only pays for the new reviews. Edited reviews (new text) and model changes miss the cache automatically.
 - **The ML dependency is optional.** torch and transformers are in an `ml` extra. Without them, analysis falls back to rating-based sentiment and keyword categories. CI runs without them: the models sit behind small `SentimentModel` and `Embedder` protocols, and the tests use deterministic fakes.
+- **One runtime, two front doors.** `runtime.py` wires the database, scraper, cached models and fetch policy together. The API and the in-process UI backend both build services from it, so the hosted demo runs exactly the code the API runs.
 - **Schema changes go through Alembic migrations,** applied on startup. Databases created before migrations existed are detected and upgraded in place, and a test checks that the migrations match the ORM models.
 
 ## How the analysis works
@@ -62,13 +66,27 @@ On 1,500 recent reviews (500 each for Duolingo, Spotify and WhatsApp, October 20
 
 Those 4–5 star complaints are what the rating-only version missed, for example *"EPIC as a PAID app, POOR as a FREE app. To many adds."* (5 stars). WhatsApp's low agreement mostly comes from very short or non-English reviews, which the model calls neutral.
 
+## The hosted demo
+
+The demo runs on Streamlit Community Cloud's free tier, which allows a single process, so the UI runs the analysis in-process ([`deploy/streamlit/streamlit_app.py`](deploy/streamlit/streamlit_app.py)). Anyone can analyze any app, which means scraping the Play Store live, and the scraper is unofficial. So the demo protects itself:
+
+- **Fetches are reused for 6 hours.** If an app was fetched recently, its stored reviews are analyzed instead of fetching again.
+- **Fetching is capped** at 30 Play Store fetches per hour and 500 reviews per fetch.
+- **Popular apps are preloaded** in the background at startup, so the apps visitors are most likely to try open instantly.
+- **Failures fall back to stored data.** If a fetch fails or hits the cap, the last stored reviews are analyzed and the page says how old they are. Only an app that has never been fetched shows an error, and it suggests the preloaded apps instead.
+- **A daily check catches breakage.** The [scraper-health workflow](.github/workflows/scraper-health.yml) runs a small real scrape every morning, and a failed run emails the repo owner.
+
+The same safeguards are settings on the API (`REVIEW_ANALYZER_SYNC_TTL_MINUTES`, `REVIEW_ANALYZER_MAX_SYNCS_PER_HOUR`, `REVIEW_ANALYZER_PRELOAD_APPS`, …), off or loose by default.
+
+Community Cloud installs [`deploy/streamlit/requirements.txt`](deploy/streamlit/requirements.txt), which is exported from `uv.lock`, so the demo runs the exact versions CI tests. CI fails if the file falls out of date.
+
 ## API
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/apps/search?q=` | Search the Play Store |
 | `GET` | `/apps/{app_id}` | Look up one app by package name |
-| `POST` | `/apps/{app_id}/sync?count=` | Fetch the newest reviews (up to 1000) and store them |
+| `POST` | `/apps/{app_id}/sync?count=&force=` | Fetch the newest reviews (up to 1000) and store them. Returns `status`: `fetched`, `fresh` (recent reviews reused) or `stale` (fetch failed, stored reviews returned) |
 | `GET` | `/apps/{app_id}/reviews?limit=&offset=` | Stored reviews, newest first, with text sentiment once scored |
 | `GET` | `/apps/{app_id}/analysis?limit=` | Analysis of the most recent `limit` stored reviews |
 | `GET` | `/apps/{app_id}/export.csv` | Stored reviews as CSV |
@@ -91,12 +109,18 @@ docker compose up --build
 
 The UI is at http://localhost:8501 and the API at http://localhost:8000/docs. The two models (about 600 MB) are downloaded into the image at build time, so the containers never call the Hugging Face Hub at runtime.
 
-Locally with [uv](https://docs.astral.sh/uv/):
+Locally with [uv](https://docs.astral.sh/uv/), the UI on its own runs everything in-process:
 
 ```bash
 uv sync --all-extras
+uv run streamlit run src/review_analyzer/ui/app.py
+```
+
+To use the API instead, start it and point the UI at it:
+
+```bash
 uv run uvicorn review_analyzer.api:create_app --factory --reload
-uv run streamlit run src/review_analyzer/ui/app.py   # in a second terminal
+REVIEW_ANALYZER_API_URL=http://localhost:8000 uv run streamlit run src/review_analyzer/ui/app.py
 ```
 
 In the UI you can search by name, or paste a package name or Play Store link.
@@ -114,6 +138,12 @@ uv run mypy
 
 CI runs all of these on every push and pull request, and also builds the Docker image and checks that the API starts.
 
+After changing dependencies, regenerate the demo's requirements file:
+
+```bash
+uv run python scripts/export_deploy_requirements.py
+```
+
 To change the schema, edit the models in `storage.py` and add a migration:
 
 ```bash
@@ -123,7 +153,8 @@ uv run alembic revision -m "describe the change"
 ```
 src/review_analyzer/
   api.py          FastAPI app and routes
-  service.py      sync / lookup / analyze use cases; scores and stores sentiment
+  runtime.py      wires storage, scraper, models and fetch policy; used by the API and UI
+  service.py      sync / lookup / analyze use cases; fetch policy; scores and stores sentiment
   scraper.py      Play Store client behind the ReviewSource protocol
   storage.py      SQLAlchemy models, repositories, migration runner
   cache.py        model wrappers that memoize outputs in the database
@@ -133,14 +164,18 @@ src/review_analyzer/
   categories.py   known issue categories and suggested fixes
   ml.py           lazily loaded sentiment and embedding models
   ui/app.py       Streamlit frontend
-scripts/          download_models.py, used by the Dockerfile to bake models into the image
-tests/            unit, API, cache and migration tests with fake models and a fake review source
+  ui/backend.py   UI data access: over HTTP to the API, or in-process
+deploy/streamlit/ hosted demo entry point and locked requirements
+scripts/          model download for Docker, demo requirements export, daily scraper check
+tests/            unit, API, UI, cache and migration tests with fake models and a fake review source
 ```
 
 ## Limitations
 
 - Text sentiment comes from a general-purpose model, not one trained on app reviews. It struggles with sarcasm, very short reviews and non-English text.
-- The first analysis of 500 new reviews takes about 20 seconds on CPU, and the request blocks while it runs. A background job with progress reporting would be the next step for larger syncs.
+- The first analysis of 500 new reviews takes about 20 seconds on a laptop CPU, and longer on the demo's shared CPU, and the request blocks while it runs. A background job with progress reporting would be the next step for larger syncs.
+- With small samples (100–200 reviews), the smaller issue groups are noisy and their labels can read oddly.
+- The demo's storage is reset whenever Community Cloud restarts it. The preload rebuilds the popular apps, and other apps are fetched again on first use.
 - Only English reviews from the US store are requested, but some non-English reviews come through anyway.
 - google-play-scraper is unofficial and returns the top "featured" search result without an ID. The client recovers it from the search page, which will break if Google changes that page.
 
