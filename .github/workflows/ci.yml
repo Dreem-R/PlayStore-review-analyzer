@@ -13,12 +13,14 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      # The ml extra (torch) isn't needed: tests use a stub summarizer.
+      # The ml extra (torch) isn't needed: tests use fake models.
       - run: uv sync --locked --extra ui --group dev
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy
       - run: uv run pytest
+      - name: Streamlit deploy requirements match uv.lock
+        run: uv run python scripts/export_deploy_requirements.py --check
 
   docker:
     runs-on: ubuntu-latest
