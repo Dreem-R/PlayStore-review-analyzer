@@ -153,3 +153,24 @@ def test_analyze_empty() -> None:
     assert result.review_count == 0
     assert result.issues == []
     assert result.versions == []
+
+
+def test_issue_members_are_every_review_most_helpful_first() -> None:
+    reviews = [
+        make_review("quiet", 1, "Way too many ads now. Also slow.", thumbs_up=0),
+        make_review("popular", 2, "The ads after every song are unbearable.", thumbs_up=25),
+        make_review("some", 1, "Ads ads ads, every few minutes.", thumbs_up=3),
+    ]
+
+    [ads] = analyze("com.example.notes", reviews, FakeEmbedder()).issues
+
+    assert [m.review_id for m in ads.members] == ["popular", "some", "quiet"]
+    # Only the sentences that raised the issue, not the rest of the review.
+    assert ads.members[2].sentences == ["Way too many ads now."]
+
+
+def test_keyword_issues_list_their_reviews(reviews: list[Review]) -> None:
+    result = analyze("com.example.notes", reviews)
+    performance = next(i for i in result.issues if i.label == "Performance")
+    # r02 has 12 helpful votes, r07 has 3.
+    assert [m.review_id for m in performance.members] == ["r02", "r07"]

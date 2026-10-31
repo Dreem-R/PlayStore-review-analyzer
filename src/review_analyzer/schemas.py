@@ -61,6 +61,11 @@ class SentimentCounts(BaseModel):
     negative: int = 0
 
 
+class IssueReview(BaseModel):
+    review_id: str
+    sentences: list[str] = Field(description="The sentences of this review that raised the issue.")
+
+
 class Issue(BaseModel):
     label: str = Field(description="Most distinctive terms in this group of complaints.")
     category: str | None = Field(
@@ -72,6 +77,9 @@ class Issue(BaseModel):
     examples: list[str]
     by_version: dict[str, int] = Field(
         description="Reviews raising this issue, per app version they were written on."
+    )
+    members: list[IssueReview] = Field(
+        description="Every review raising this issue, most helpful first, with matching sentences."
     )
 
 
