@@ -1,6 +1,7 @@
 """SQLite persistence for fetched reviews, so repeat analyses don't hit the Play Store."""
 
 from collections.abc import Collection, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -17,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    event,
     func,
     inspect,
     make_url,
@@ -32,6 +34,11 @@ from review_analyzer.schemas import Review, Sentiment
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 # Schema that databases created before migrations were introduced already have.
 BASELINE_REVISION = "0001"
+
+
+def utcnow() -> datetime:
+    """Naive UTC, which is what SQLite stores and returns."""
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
@@ -50,7 +57,7 @@ class ReviewRow(Base):
     created_at: Mapped[datetime]
     app_version: Mapped[str | None]
     thumbs_up: Mapped[int] = mapped_column(default=0)
-    fetched_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    fetched_at: Mapped[datetime] = mapped_column(default=utcnow)
     text_sentiment: Mapped[str | None]
     sentiment_score: Mapped[float | None] = mapped_column(Float)
 
@@ -72,6 +79,27 @@ class EmbeddingCacheRow(Base):
     vector: Mapped[bytes] = mapped_column(LargeBinary)
 
 
+class SyncRow(Base):
+    """One fetch from the Play Store. Drives freshness checks and the hourly fetch limit."""
+
+    __tablename__ = "syncs"
+    __table_args__ = (Index("ix_syncs_app_synced", "app_id", "synced_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app_id: Mapped[str]
+    synced_at: Mapped[datetime] = mapped_column(index=True)
+    requested: Mapped[int]
+    fetched: Mapped[int]
+
+
+@dataclass(frozen=True)
+class SyncRecord:
+    app_id: str
+    synced_at: datetime
+    requested: int
+    fetched: int
+
+
 def make_engine(database_url: str) -> Engine:
     url = make_url(database_url)
     if url.get_backend_name() != "sqlite":
@@ -83,7 +111,18 @@ def make_engine(database_url: str) -> Engine:
         # One shared connection, otherwise every connection gets its own empty in-memory DB.
         return create_engine(url, connect_args=connect_args, poolclass=StaticPool)
     Path(url.database).parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(url, connect_args=connect_args)
+    engine = create_engine(url, connect_args=connect_args)
+
+    @event.listens_for(engine, "connect")
+    def configure(connection: Any, record: Any) -> None:
+        # WAL lets the background preload write while visitors read, and the busy
+        # timeout makes concurrent writers wait instead of failing with "database is locked".
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+
+    return engine
 
 
 def init_db(engine: Engine) -> None:
@@ -152,6 +191,29 @@ class ReviewRepository:
             .offset(offset)
         )
         return [Review.model_validate(row) for row in self._session.scalars(stmt)]
+
+
+class SyncLog:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def record(self, app_id: str, requested: int, fetched: int, at: datetime) -> None:
+        self._session.add(
+            SyncRow(app_id=app_id, synced_at=at, requested=requested, fetched=fetched)
+        )
+        self._session.commit()
+
+    def last(self, app_id: str) -> SyncRecord | None:
+        row = self._session.scalars(
+            select(SyncRow).where(SyncRow.app_id == app_id).order_by(SyncRow.synced_at.desc())
+        ).first()
+        if row is None:
+            return None
+        return SyncRecord(row.app_id, row.synced_at, row.requested, row.fetched)
+
+    def count_since(self, since: datetime) -> int:
+        stmt = select(func.count()).select_from(SyncRow).where(SyncRow.synced_at >= since)
+        return self._session.scalar(stmt) or 0
 
 
 def _chunks(items: Sequence[str], size: int = 500) -> Iterator[Sequence[str]]:
